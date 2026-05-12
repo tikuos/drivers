@@ -1,0 +1,25 @@
+# Build artifacts (drivers compile into the consumer's tikuOS build
+# tree; nothing should land here, but guard against accidental copies).
+*.o
+*.obj
+*.a
+*.elf
+*.bin
+*.uf2
+*.map
+*.lst
+*.hex
+build/
+
+# Editor / OS scratch.
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local notes.
+TODO.local
+NOTES.local

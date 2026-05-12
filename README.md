@@ -44,3 +44,12 @@ tikudrivers/
 - All driver code returns `TIKU_DRV_OK` (= 0) on success; negative
   for errors. Driver-specific positive codes are allowed but
   discouraged — the kernel only checks zero vs non-zero.
+
+## Driver-specific docs
+
+Each driver carries its own README with status, build flags, and
+hardware notes. Direct links:
+
+- [`wifi/cyw43/README.md`](wifi/cyw43/README.md) — CYW43439 (Pi Pico
+  2 W). Clean-room C implementation. gSPI transport on PIO,
+  SDPCM/CDC/BDC WHD protocol, active scan working against real APs.
