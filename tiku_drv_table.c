@@ -11,7 +11,7 @@
  * contribute zero bytes to the final image.
  *
  * Adding a driver:
- *   1. Create tikudrivers/<class>/<name>/ from skeleton/.
+ *   1. Create drivers/<class>/<name>/ from skeleton/.
  *   2. Add an `extern const tiku_drv_t tiku_drv_<class>_<name>;`
  *      below, guarded by the enable flag.
  *   3. Add an `&tiku_drv_<class>_<name>,` entry to the array

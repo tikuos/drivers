@@ -20,7 +20,7 @@ extern "C" {
 /*
  * The descriptor is the kernel's handle on this driver. It is
  * defined in tiku_drv_skeleton.c and referenced by an extern in
- * tikudrivers/tiku_drv_table.c (guarded by TIKU_DRV_SKELETON_ENABLE).
+ * drivers/tiku_drv_table.c (guarded by TIKU_DRV_SKELETON_ENABLE).
  */
 extern const tiku_drv_t tiku_drv_skeleton;
 

@@ -24,7 +24,7 @@ extern "C" {
 
 /*
  * Descriptor symbol — referenced by an extern in
- * tikudrivers/tiku_drv_table.c. The kernel finds the driver
+ * drivers/tiku_drv_table.c. The kernel finds the driver
  * through this descriptor; nothing else in this header is
  * load-bearing for v0.
  */

@@ -3,8 +3,8 @@
 Copy this directory to start a new driver:
 
 ```
-cp -r tikudrivers/skeleton tikudrivers/<class>/<name>
-cd tikudrivers/<class>/<name>
+cp -r drivers/skeleton drivers/<class>/<name>
+cd drivers/<class>/<name>
 
 # Rename in every file (header, .c, build.mk):
 #   tiku_drv_skeleton           ->  tiku_drv_<class>_<name>
@@ -17,7 +17,7 @@ Then:
 1. Implement `init()` (and `deinit()` if you have hardware to undo).
 2. If your driver exposes observable state, fill in the
    `vfs_nodes` array and `vfs_mount` name.
-3. Edit `tikudrivers/tiku_drv_table.c`: add the `extern` and the
+3. Edit `drivers/tiku_drv_table.c`: add the `extern` and the
    guarded array entry.
 4. Build: `make TIKU_DRV_<CLASS>_<NAME>_ENABLE=1 ...`
 
@@ -31,7 +31,7 @@ is local to your driver directory.
 - `tiku_drv_skeleton.c` — descriptor definition, init/deinit,
   VFS handler stubs.
 - `build.mk` — Makefile fragment auto-included by the top-level
-  Makefile when this directory is under `tikudrivers/`.
+  Makefile when this directory is under `drivers/`.
 
 ## Class choice
 

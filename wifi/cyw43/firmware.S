@@ -27,7 +27,7 @@
     .global cyw43_firmware_data
     .type   cyw43_firmware_data, %object
 cyw43_firmware_data:
-    .incbin "tikudrivers/wifi/cyw43/firmware/43439A0.bin"
+    .incbin "drivers/wifi/cyw43/firmware/43439A0.bin"
     .global cyw43_firmware_data_end
 cyw43_firmware_data_end:
     .size   cyw43_firmware_data, . - cyw43_firmware_data
@@ -45,7 +45,7 @@ cyw43_firmware_size:
     .global cyw43_nvram_data
     .type   cyw43_nvram_data, %object
 cyw43_nvram_data:
-    .incbin "tikudrivers/wifi/cyw43/firmware/nvram.bin"
+    .incbin "drivers/wifi/cyw43/firmware/nvram.bin"
     .global cyw43_nvram_data_end
 cyw43_nvram_data_end:
     .size   cyw43_nvram_data, . - cyw43_nvram_data
@@ -63,7 +63,7 @@ cyw43_nvram_size:
     .global cyw43_clm_data
     .type   cyw43_clm_data, %object
 cyw43_clm_data:
-    .incbin "tikudrivers/wifi/cyw43/firmware/43439A0_clm.bin"
+    .incbin "drivers/wifi/cyw43/firmware/43439A0_clm.bin"
     .global cyw43_clm_data_end
 cyw43_clm_data_end:
     .size   cyw43_clm_data, . - cyw43_clm_data

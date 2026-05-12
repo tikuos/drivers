@@ -3,7 +3,7 @@
 Hardware-touching drivers for TikuOS. Sibling of `tikukits/`; same
 "separate repo, optional, slots into the kernel tree via Makefile
 probe" model. The kernel detects this directory's presence via
-`HAS_TIKUDRIVERS=1` and links the descriptor table from
+`HAS_DRIVERS=1` and links the descriptor table from
 `tiku_drv_table.c`.
 
 Authoritative design doc: `../drivers.md` in the core repo.
@@ -11,7 +11,7 @@ Authoritative design doc: `../drivers.md` in the core repo.
 ## Layout
 
 ```
-tikudrivers/
+drivers/
 ├── README.md             (this file)
 ├── tiku_drv_table.c      (the per-build descriptor list)
 ├── skeleton/             (copy-paste template for new drivers)
