@@ -36,6 +36,7 @@
 #include <kernel/process/tiku_process.h>
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_timer.h>
+#include <hal/tiku_gpio_irq_hal.h>
 #include <string.h>
 
 /*---------------------------------------------------------------------------*/
@@ -147,6 +148,12 @@ static struct {
      * ticks (TIKU_CLOCK_SECOND ticks/sec). 0 if no scan has finished
      * yet. Captured at scan_start / scan_end inside the runner. */
     uint32_t last_scan_ticks;
+    /* R.6 instrumentation: count of GPIO IRQ events received on
+     * WL_DATA. Increments whenever the chip asserts the shared
+     * DATA/IRQ line (or whenever the PIO drives it during a
+     * transaction — full filtering is future work). Used by
+     * 'wifi status' to confirm the IRQ wiring is live. */
+    uint32_t gpio_irq_count;
     /* Last completed scan's deduplicated AP table. The runner
      * appends here during scan; subscribers iterate after the
      * CYW43_WIFI_EVT_SCAN_COMPLETE broadcast. */
@@ -956,6 +963,40 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
         cyw43_state.up = 1U;
         /* Solid LED = WHD ready. */
         if (tiku_led_count() > 0U) tiku_led_on(0U);
+
+        /* R.6 scoped: enable GPIO IRQ on WL_DATA (= GP24) — the
+         * chip drives this line high when CS is deasserted to
+         * signal "I have something for the host." Rising-edge IRQ
+         * fires the platform's IO_BANK0 ISR which broadcasts a
+         * TIKU_EVENT_GPIO event; we count occurrences below to
+         * validate the wiring.
+         *
+         * Why direct register access instead of
+         * tiku_gpio_irq_arch_enable: that helper calls
+         * tiku_gpio_arch_set_input() which rewrites the pin's
+         * function to SIO, which would yank GP24 out from under
+         * the PIO that drives gSPI. The IRQ block reads the pad
+         * input regardless of pin function, so we just program
+         * INTR + INTE directly and leave the function as PIO1.
+         *
+         * NOTE: the IRQ still fires during transactions (PIO
+         * drives the line high — that's an edge). The count
+         * therefore includes per-transaction fires; CS-aware
+         * filtering is the next step. */
+        {
+            uint8_t  word  = 24U >> 3;        /* GP24 / 8 = 3 */
+            uint8_t  shift = (24U & 7U) << 2; /* 0 */
+            uint32_t mask  = (uint32_t)RP2350_IO_INT_EDGE_HIGH << shift;
+            /* Clear any pending edge from before we arm. */
+            _RP2350_REG_SET(RP2350_IO_BANK0_INTR(word),       mask);
+            /* Unmask the edge in PROC0_INTE. */
+            _RP2350_REG_SET(RP2350_IO_BANK0_PROC0_INTE(word), mask);
+            /* Unmask IO_BANK0 at the NVIC. */
+            rp2350_nvic_clear_pending(RP2350_IRQ_IO_BANK0);
+            rp2350_nvic_enable(RP2350_IRQ_IO_BANK0);
+            CYW43_PRINTF("runner: GPIO IRQ on GP24 enabled (rising, "
+                         "pin function untouched)\n");
+        }
         /* Self-post the first SCAN_START to demonstrate the event
          * path. Once a shell command + user-facing API land (phase
          * R.5), this auto-scan can be removed. */
@@ -973,6 +1014,19 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          * system since the last check. Cheap (two reads + a write),
          * keeps the WiFi side observably alive. */
         runner_health_tick();
+
+        /* R.6 scoped: count GPIO IRQ deliveries on WL_DATA (GP24).
+         * The arch packs (port=4, pin=0) for GP24 because TikuOS's
+         * GPIO IRQ HAL uses MSP430-style 8-pins-per-virtual-port
+         * indexing — see arch/arm-rp2350/tiku_gpio_irq_arch.c.
+         * Counting is the proof the IRQ path works; CS-aware
+         * filtering + replacing timer-yield with irq-wait is the
+         * next step. */
+        if (ev == TIKU_EVENT_GPIO
+            && TIKU_GPIO_IRQ_PORT(data) == 4U
+            && TIKU_GPIO_IRQ_PIN(data)  == 0U) {
+            cyw43_state.gpio_irq_count += 1U;
+        }
 
         if (ev == CYW43_WIFI_EVT_SCAN_START && cyw43_state.up) {
             CYW43_PRINTF("runner: SCAN_START — starting active scan\n");
@@ -1186,6 +1240,7 @@ int tiku_wireless_status(cyw43_wifi_status_t *out)
     out->scan_in_progress = cyw43_state.scan_in_progress;
     out->scan_aps_found   = cyw43_state.scan_aps_found;
     out->last_scan_ticks  = cyw43_state.last_scan_ticks;
+    out->irq_count        = cyw43_state.gpio_irq_count;
     for (i = 0; i < 6; ++i) out->mac[i] = cyw43_state.mac[i];
     return TIKU_DRV_OK;
 }
