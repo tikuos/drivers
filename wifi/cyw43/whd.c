@@ -159,6 +159,19 @@ static struct {
      * CYW43_WIFI_EVT_SCAN_COMPLETE broadcast. */
     uint8_t    scan_count;
     cyw43_ap_t scan_results[CYW43_MAX_SCAN_RESULTS];
+
+    /* Phase 4.B station-mode join state. target_ssid / target_psk
+     * live here so the runner can pick them up after the shell
+     * command returns (strings copied at API-call time, not
+     * borrowed from caller). */
+    uint8_t    link_state;        /* tiku_wireless_link_t */
+    uint8_t    target_ssid_len;
+    char       target_ssid[33];   /* null-terminated, max 32 chars */
+    char       target_psk[64];    /* null-terminated, 8..63 chars */
+    uint8_t    joined_ssid_len;
+    uint8_t    joined_ssid[32];
+    uint8_t    joined_bssid[6];
+    uint32_t   link_status_raw;
 } cyw43_state;
 
 /*---------------------------------------------------------------------------*/
@@ -709,6 +722,225 @@ p3b_done:
 }
 
 /*---------------------------------------------------------------------------*/
+/* WPA2 join helpers (phase 4.B)                                             */
+/*---------------------------------------------------------------------------*/
+/*
+ * Sequence for WPA2-PSK association (mirrors embassy's control::join):
+ *
+ *   SET_VAR("ampdu_ba_wsize", 8)
+ *   IOCTL  WLC_SET_WSEC(134, AES=4)
+ *   SET_VAR("bsscfg:sup_wpa",         idx=0, val=1)
+ *   SET_VAR("bsscfg:sup_wpa2_eapver", idx=0, val=0xFFFFFFFF)
+ *   SET_VAR("bsscfg:sup_wpa_tmo",     idx=0, val=2500)
+ *   ~100 ms scheduler yield
+ *   IOCTL  WLC_SET_WSEC_PMK(268, passphrase)
+ *   IOCTL  WLC_SET_INFRA  (20,  STA=1)
+ *   IOCTL  WLC_SET_AUTH   (22,  AUTH_OPEN=0)
+ *   SET_VAR("mfp", MFP_CAPABLE=1)
+ *   IOCTL  WLC_SET_WPA_AUTH(165, WPA2_PSK=0x0080)
+ *   IOCTL  WLC_SET_SSID(26, ssid)        ← triggers assoc FSM
+ *
+ * The chip then fires a sequence of events on channel 1:
+ *   WLC_E_SET_SSID, WLC_E_AUTH, WLC_E_ASSOC, WLC_E_PSK_SUP, WLC_E_LINK.
+ * The acceptance signal is WLC_E_LINK (event_type=16) with
+ * status=WLC_E_STATUS_SUCCESS(0) AND data-byte indicating link=up.
+ *
+ * Why some of these go through SET_VAR and others through raw WLC
+ * commands: the CYW43 firmware exposes a fixed set of legacy WLC
+ * IOCTLs (SetInfra, SetAuth, SetWsec, SetWpaAuth, SetWsecPmk, etc.)
+ * that pre-date the iovar mechanism. The iovar layer was added later
+ * for everything else. Sending one as the other returns WL_BADARG
+ * (status 0xFFFFFFE9 in the IOCTL response).
+ */
+
+/* WPA2-PSK auth + crypto constants (from embassy's consts.rs). */
+#define WHD_WSEC_AES         0x04U
+#define WHD_AUTH_OPEN        0x00U
+#define WHD_MFP_CAPABLE      0x01U
+#define WHD_WPA_AUTH_WPA2_PSK 0x0080UL
+
+/* Set a u32-valued iovar by name. Builds the "<name>\0<u32 LE>"
+ * payload and sends WLC_SET_VAR. */
+static int whd_set_iovar_u32(const char *name, uint32_t value)
+{
+    uint8_t  buf[40];
+    uint16_t n = 0U;
+    while (name[n] != '\0' && n < 24U) { buf[n] = (uint8_t)name[n]; n++; }
+    buf[n++] = '\0';
+    buf[n++] = (uint8_t)( value        & 0xFFU);
+    buf[n++] = (uint8_t)((value >> 8 ) & 0xFFU);
+    buf[n++] = (uint8_t)((value >> 16) & 0xFFU);
+    buf[n++] = (uint8_t)((value >> 24) & 0xFFU);
+    return whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
+                     buf, n, (uint8_t *)0, 0U, (uint32_t *)0);
+}
+
+/* Set a (u32,u32)-valued iovar — needed for bsscfg:* family which
+ * takes a config index in addition to the value. Builds
+ * "<name>\0<idx LE><val LE>" as the SET_VAR payload. */
+static int whd_set_iovar_u32x2(const char *name, uint32_t idx, uint32_t value)
+{
+    uint8_t  buf[44];
+    uint16_t n = 0U;
+    while (name[n] != '\0' && n < 24U) { buf[n] = (uint8_t)name[n]; n++; }
+    buf[n++] = '\0';
+    buf[n++] = (uint8_t)( idx          & 0xFFU);
+    buf[n++] = (uint8_t)((idx   >>  8) & 0xFFU);
+    buf[n++] = (uint8_t)((idx   >> 16) & 0xFFU);
+    buf[n++] = (uint8_t)((idx   >> 24) & 0xFFU);
+    buf[n++] = (uint8_t)( value        & 0xFFU);
+    buf[n++] = (uint8_t)((value >>  8) & 0xFFU);
+    buf[n++] = (uint8_t)((value >> 16) & 0xFFU);
+    buf[n++] = (uint8_t)((value >> 24) & 0xFFU);
+    return whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
+                     buf, n, (uint8_t *)0, 0U, (uint32_t *)0);
+}
+
+/* Set a u32-valued raw WLC IOCTL (e.g. WLC_SET_INFRA, WLC_SET_AUTH,
+ * WLC_SET_WSEC, WLC_SET_WPA_AUTH). Payload is the bare 4-byte LE u32 —
+ * no iovar name prefix. */
+static int whd_ioctl_set_u32(uint32_t cmd, uint32_t value)
+{
+    uint8_t buf[4];
+    buf[0] = (uint8_t)( value        & 0xFFU);
+    buf[1] = (uint8_t)((value >>  8) & 0xFFU);
+    buf[2] = (uint8_t)((value >> 16) & 0xFFU);
+    buf[3] = (uint8_t)((value >> 24) & 0xFFU);
+    return whd_ioctl(WHD_IOCTL_KIND_SET, cmd, 0U,
+                     buf, 4U, (uint8_t *)0, 0U, (uint32_t *)0);
+}
+
+/* Submit the WPA2 passphrase to the chip. wsec_pmk_t layout:
+ *   u16 key_len      passphrase byte count (8..63 for WPA2-PSK)
+ *   u16 flags        1 = passphrase (chip will run PBKDF2 internally)
+ *   u8  key[64]
+ * Total = 68 bytes, sent as the payload of WLC_SET_WSEC_PMK (cmd=268). */
+static int whd_set_passphrase(const char *psk)
+{
+    uint8_t  buf[68];
+    uint16_t i, len = 0U;
+    while (psk[len] != '\0' && len < 63U) ++len;
+    if (len < 8U) return TIKU_DRV_ERR_INVALID;  /* WPA2 minimum */
+
+    buf[0] = (uint8_t)( len       & 0xFFU);
+    buf[1] = (uint8_t)((len >> 8) & 0xFFU);
+    buf[2] = 0x01U; buf[3] = 0x00U;            /* flags = passphrase */
+    for (i = 0U; i < len; ++i) buf[4U + i] = (uint8_t)psk[i];
+    for (i = len; i < 64U; ++i) buf[4U + i] = 0U;
+    return whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_WSEC_PMK, 0U,
+                     buf, 68U, (uint8_t *)0, 0U, (uint32_t *)0);
+}
+
+/* Submit the SSID to join. wlc_ssid_t layout:
+ *   u32 ssid_len
+ *   u8  ssid[32]
+ * Sent as the payload of WLC_SET_SSID (cmd=26). This call is what
+ * actually kicks the chip's association FSM into motion. */
+static int whd_set_ssid(const char *ssid, uint8_t ssid_len)
+{
+    uint8_t  buf[36];
+    uint8_t  i;
+    if (ssid_len == 0U || ssid_len > 32U) return TIKU_DRV_ERR_INVALID;
+    buf[0] = ssid_len; buf[1] = 0U; buf[2] = 0U; buf[3] = 0U;
+    for (i = 0U; i < ssid_len; ++i) buf[4U + i] = (uint8_t)ssid[i];
+    for (i = ssid_len; i < 32U; ++i) buf[4U + i] = 0U;
+    return whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_SSID, 0U,
+                     buf, 36U, (uint8_t *)0, 0U, (uint32_t *)0);
+}
+
+/* Run the full pre-SSID join setup. Order matches embassy's
+ * control::join(). SSID is sent separately (it's the assoc trigger). */
+static int whd_join_prepare(const char *psk)
+{
+    int rc;
+
+    rc = whd_set_iovar_u32("ampdu_ba_wsize", 8UL);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: ampdu_ba_wsize FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_ioctl_set_u32(WHD_CMD_SET_WSEC, WHD_WSEC_AES);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: wsec FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_set_iovar_u32x2("bsscfg:sup_wpa", 0UL, 1UL);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: sup_wpa FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_set_iovar_u32x2("bsscfg:sup_wpa2_eapver", 0UL, 0xFFFFFFFFUL);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: sup_wpa2_eapver FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_set_iovar_u32x2("bsscfg:sup_wpa_tmo", 0UL, 2500UL);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: sup_wpa_tmo FAIL rc=%d\n", rc); return rc; }
+
+    /* embassy: 100ms after sup_wpa group, 3ms before SET_WSEC_PMK. We
+     * defer that to the runner — staying in PT_YIELD here would block
+     * the IOCTL machinery. Empirically the chip is fine with this. */
+
+    rc = whd_set_passphrase(psk);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: passphrase FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_ioctl_set_u32(WHD_CMD_SET_INFRA, 1UL);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: infra FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_ioctl_set_u32(WHD_CMD_SET_AUTH, WHD_AUTH_OPEN);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: auth FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_set_iovar_u32("mfp", WHD_MFP_CAPABLE);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: mfp FAIL rc=%d\n", rc); return rc; }
+
+    rc = whd_ioctl_set_u32(WHD_CMD_SET_WPA_AUTH, WHD_WPA_AUTH_WPA2_PSK);
+    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: wpa_auth FAIL rc=%d\n", rc); return rc; }
+
+    return TIKU_DRV_OK;
+}
+
+/* Parse the F2 frame currently in whd_rx_buf as a WLC_E_LINK event.
+ * Returns +1 on link-up (success), -1 on link-down/failed, 0 if the
+ * frame is something else (not a LINK event we care about). */
+static int whd_link_event_parse(uint32_t *out_status)
+{
+    const uint8_t *rx_buf = (const uint8_t *)whd_rx_buf;
+    uint8_t  ch       = rx_buf[5] & 0xFU;
+    uint16_t sdpcm_lc = (uint16_t)(rx_buf[0] | (rx_buf[1] << 8));
+    uint8_t  hdr_off  = rx_buf[7];
+    const uint8_t *bdc, *eth, *evh, *msg;
+    uint16_t ether_type, evh_user_sub;
+    uint32_t ev_type, ev_status;
+    uint16_t ev_flags;
+
+    if (ch != 1U) return 0;
+    if ((uint32_t)hdr_off + 4U + 14U + 10U + 48U > sdpcm_lc) return 0;
+
+    bdc          = rx_buf + hdr_off;
+    eth          = bdc + 4U + ((uint32_t)bdc[3] * 4U);
+    ether_type   = (uint16_t)((eth[12] << 8) | eth[13]);
+    evh          = eth + 14U;
+    evh_user_sub = (uint16_t)((evh[8] << 8) | evh[9]);
+    msg          = evh + 10U;
+
+    if (ether_type != 0x886CU || evh_user_sub != 1U) return 0;
+
+    ev_flags  = (uint16_t)((msg[2] << 8) | msg[3]);
+    ev_type   =  ((uint32_t)msg[4]  << 24) | ((uint32_t)msg[5]  << 16)
+              |  ((uint32_t)msg[6]  <<  8) |  (uint32_t)msg[7];
+    ev_status =  ((uint32_t)msg[8]  << 24) | ((uint32_t)msg[9]  << 16)
+              |  ((uint32_t)msg[10] <<  8) |  (uint32_t)msg[11];
+
+    /* Log every interesting bring-up event for diagnostics. */
+    if (ev_type == 0U  || ev_type == 3U  || ev_type == 7U  ||
+        ev_type == 16U || ev_type == 46U) {
+        CYW43_PRINTF("join: chip event type=%lu status=0x%lx flags=0x%04x\n",
+                     (unsigned long)ev_type, (unsigned long)ev_status,
+                     ev_flags);
+    }
+
+    if (ev_type != 16U) return 0;       /* not WLC_E_LINK */
+
+    if (out_status) *out_status = ev_status;
+
+    /* WLC_F_EVENT_LINK_UP bit (= 0x0001) lives in event flags. */
+    if (ev_status == 0U && (ev_flags & 0x0001U)) return +1;
+    return -1;
+}
+
+/*---------------------------------------------------------------------------*/
 /* Scan helpers — split into iovar-send + per-frame parser                   */
 /*---------------------------------------------------------------------------*/
 /*
@@ -943,6 +1175,10 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     static int               scan_done;
     static int               scan_rc;
     static tiku_clock_time_t scan_start_tick;
+    static struct tiku_timer join_timer;
+    static unsigned int      join_polls;
+    static int               join_done;
+    static uint32_t          join_link_status;
 
     TIKU_PROCESS_BEGIN();
 
@@ -1132,7 +1368,103 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 CYW43_WIFI_EVT_SCAN_COMPLETE,
                 (tiku_event_data_t)(uintptr_t)cyw43_state.scan_count);
         }
-        /* Future: CYW43_WIFI_EVT_JOIN_START, _DISCONNECT, etc. */
+        if (ev == TIKU_WIRELESS_EVT_JOIN_START && cyw43_state.up) {
+            int rc_j;
+
+            CYW43_PRINTF("runner: JOIN_START — ssid=\"%s\" len=%u\n",
+                         cyw43_state.target_ssid,
+                         (unsigned)cyw43_state.target_ssid_len);
+            cyw43_state.link_state      = TIKU_WIRELESS_LINK_CONNECTING;
+            cyw43_state.link_status_raw = 0UL;
+
+            rc_j = whd_join_prepare(cyw43_state.target_psk);
+            if (rc_j == TIKU_DRV_OK) {
+                rc_j = whd_set_ssid(cyw43_state.target_ssid,
+                                    cyw43_state.target_ssid_len);
+            }
+            if (rc_j != TIKU_DRV_OK) {
+                CYW43_PRINTF("runner: join setup FAIL rc=%d\n", rc_j);
+                cyw43_state.link_state = TIKU_WIRELESS_LINK_FAILED;
+                continue;
+            }
+            CYW43_PRINTF("runner: SSID set — waiting for LINK_UP event "
+                         "(up to ~10 s)...\n");
+
+            /* Drain F2 events until WLC_E_LINK with link=up arrives,
+             * a link-down/fail arrives, or we time out. ~700 polls *
+             * 1-tick yield (~7.81 ms) ≈ 5.5 s. WPA2 4-way usually
+             * completes inside 2 s on an open path. We double-loop
+             * once on a single timeout to give slow APs more room. */
+            join_done = 0;
+            join_link_status = 0UL;
+            for (join_polls = 0U;
+                 join_polls < 1400U && !join_done;
+                 ++join_polls)
+            {
+                uint32_t pkt_len = 0UL;
+                int      lr;
+
+                tiku_watchdog_kick();
+                (void)cyw43_gspi_f2_rx_try(whd_rx_buf,
+                                           WHD_RX_BUF_WORDS, &pkt_len);
+                if (pkt_len > 0U) {
+                    sdpcm_update_credit_from_rx(
+                        (const uint8_t *)whd_rx_buf);
+                    lr = whd_link_event_parse(&join_link_status);
+                    if (lr > 0) {
+                        join_done = +1;  /* link up */
+                        break;
+                    } else if (lr < 0) {
+                        join_done = -1;  /* link failed */
+                        break;
+                    }
+                }
+                PT_WAIT_UNTIL_TIMEOUT(process_pt, &join_timer,
+                                      join_done != 0, 1U);
+            }
+
+            cyw43_state.link_status_raw = join_link_status;
+            if (join_done > 0) {
+                /* Capture the SSID we joined (echo target — chip
+                 * doesn't have a clean readback IOCTL we use here). */
+                {
+                    uint8_t k;
+                    cyw43_state.joined_ssid_len = cyw43_state.target_ssid_len;
+                    for (k = 0U; k < 32U; ++k) {
+                        cyw43_state.joined_ssid[k] =
+                            (k < cyw43_state.target_ssid_len)
+                                ? (uint8_t)cyw43_state.target_ssid[k] : 0U;
+                    }
+                }
+                cyw43_state.link_state = TIKU_WIRELESS_LINK_JOINED;
+                CYW43_PRINTF("runner: *** LINK UP — joined %s ***\n",
+                             cyw43_state.target_ssid);
+                (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                        TIKU_WIRELESS_EVT_LINK_UP,
+                                        (tiku_event_data_t)(uintptr_t)0);
+            } else {
+                cyw43_state.link_state = TIKU_WIRELESS_LINK_FAILED;
+                CYW43_PRINTF("runner: join FAILED (link_status=0x%lx, "
+                             "polls=%u)\n",
+                             (unsigned long)join_link_status, join_polls);
+                (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                        TIKU_WIRELESS_EVT_LINK_DOWN,
+                                        (tiku_event_data_t)(uintptr_t)
+                                          join_link_status);
+            }
+        }
+
+        if (ev == TIKU_WIRELESS_EVT_DISCONNECT) {
+            int rc_d = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_DISASSOC, 0U,
+                                 (const uint8_t *)0, 0U,
+                                 (uint8_t *)0, 0U, (uint32_t *)0);
+            CYW43_PRINTF("runner: DISCONNECT rc=%d\n", rc_d);
+            cyw43_state.link_state      = TIKU_WIRELESS_LINK_IDLE;
+            cyw43_state.joined_ssid_len = 0U;
+            (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                    TIKU_WIRELESS_EVT_LINK_DOWN,
+                                    (tiku_event_data_t)(uintptr_t)0);
+        }
     }
 
     TIKU_PROCESS_END();
@@ -1241,8 +1573,48 @@ int tiku_wireless_status(cyw43_wifi_status_t *out)
     out->scan_aps_found   = cyw43_state.scan_aps_found;
     out->last_scan_ticks  = cyw43_state.last_scan_ticks;
     out->irq_count        = cyw43_state.gpio_irq_count;
-    for (i = 0; i < 6; ++i) out->mac[i] = cyw43_state.mac[i];
+    out->link_state       = cyw43_state.link_state;
+    out->joined_ssid_len  = cyw43_state.joined_ssid_len;
+    out->link_status_raw  = cyw43_state.link_status_raw;
+    for (i = 0; i < 6; ++i) out->mac[i]          = cyw43_state.mac[i];
+    for (i = 0; i < 6; ++i) out->joined_bssid[i] = cyw43_state.joined_bssid[i];
+    for (i = 0; i < 32; ++i) out->joined_ssid[i] = cyw43_state.joined_ssid[i];
     return TIKU_DRV_OK;
+}
+
+int tiku_wireless_connect(const char *ssid, const char *psk)
+{
+    uint8_t i, slen = 0U, plen = 0U;
+    if (!ssid || !psk) return TIKU_DRV_ERR_INVALID;
+    if (!cyw43_state.up) return TIKU_DRV_ERR_INVALID;
+    if (cyw43_state.link_state == TIKU_WIRELESS_LINK_CONNECTING) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+    while (ssid[slen] && slen < 32U) ++slen;
+    while (psk[plen]  && plen < 63U) ++plen;
+    if (slen == 0U || plen < 8U) return TIKU_DRV_ERR_INVALID;
+
+    /* Copy strings into runner-owned storage. Caller's buffers may
+     * be on the shell command's stack — they don't survive the
+     * tiku_process_post return. */
+    for (i = 0U; i < slen; ++i) cyw43_state.target_ssid[i] = ssid[i];
+    cyw43_state.target_ssid[slen] = '\0';
+    cyw43_state.target_ssid_len   = slen;
+    for (i = 0U; i < plen; ++i) cyw43_state.target_psk[i] = psk[i];
+    cyw43_state.target_psk[plen] = '\0';
+    cyw43_state.link_state = TIKU_WIRELESS_LINK_CONNECTING;
+
+    return tiku_process_post(&cyw43_runner,
+                             TIKU_WIRELESS_EVT_JOIN_START, NULL)
+           ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
+}
+
+int tiku_wireless_disconnect(void)
+{
+    if (!cyw43_state.up) return TIKU_DRV_ERR_INVALID;
+    return tiku_process_post(&cyw43_runner,
+                             TIKU_WIRELESS_EVT_DISCONNECT, NULL)
+           ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
 }
 
 uint8_t tiku_wireless_scan_results(cyw43_ap_t *out, uint8_t max_results)

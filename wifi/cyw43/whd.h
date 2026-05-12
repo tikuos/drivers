@@ -50,10 +50,20 @@ extern "C" {
 #define WHD_IOCTL_KIND_GET 0U
 #define WHD_IOCTL_KIND_SET 2U
 
-/* WLC IOCTL command codes used in phase 3+. */
-#define WHD_CMD_UP      2U     /* WLC_UP: bring radio up */
-#define WHD_CMD_GET_VAR 262U
-#define WHD_CMD_SET_VAR 263U
+/* WLC IOCTL command codes used in phase 3+. The CYW43 firmware
+ * exposes some join knobs as raw WLC commands (not iovars), so
+ * SetInfra/SetAuth/SetWsec/SetWpaAuth go via WHD_CMD_* directly,
+ * NOT via WHD_CMD_SET_VAR. Mixing the two paths gets WL_BADARG. */
+#define WHD_CMD_UP            2U    /* WLC_UP: bring radio up */
+#define WHD_CMD_SET_INFRA    20U    /* WLC_SET_INFRA: STA(1) / AP(0) */
+#define WHD_CMD_SET_AUTH     22U    /* WLC_SET_AUTH: AUTH_OPEN(0)/SAE(3) */
+#define WHD_CMD_SET_SSID     26U    /* WLC_SET_SSID — triggers join */
+#define WHD_CMD_DISASSOC     52U    /* WLC_DISASSOC */
+#define WHD_CMD_SET_WSEC    134U    /* WLC_SET_WSEC: AES(4) / TKIP(2) bitmask */
+#define WHD_CMD_SET_WPA_AUTH 165U   /* WLC_SET_WPA_AUTH: WPA2-PSK=0x80 */
+#define WHD_CMD_GET_VAR     262U
+#define WHD_CMD_SET_VAR     263U
+#define WHD_CMD_SET_WSEC_PMK 268U   /* WLC_SET_WSEC_PMK — passphrase */
 
 /*---------------------------------------------------------------------------*/
 /* Runner-process events                                                     */
