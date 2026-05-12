@@ -329,6 +329,47 @@ int cyw43_gspi_bp_write(uint32_t bp_addr, const uint8_t *data,
  */
 int cyw43_gspi_probe_chip_id(void);
 
+/*---------------------------------------------------------------------------*/
+/* F2 (FUNC_WLAN) packet primitives                                          */
+/*---------------------------------------------------------------------------*/
+/*
+ * F2 carries the WHD packet path. Unlike F1 backplane reads, F2
+ * reads have no response-delay padding word: the cmd word is
+ * followed directly by N data words. These are the transport
+ * primitives the protocol layer (whd.c) builds SDPCM frames on
+ * top of.
+ *
+ * The caller supplies the destination buffer. Both directions are
+ * 32-bit-word aligned on the wire; the helpers handle byte-count
+ * → word-count rounding.
+ */
+
+/**
+ * @brief Read one F2 packet if SPI_STATUS reports F2_PKT_AVAILABLE.
+ *        Non-blocking; on no-packet, sets *out_byte_count = 0 and
+ *        returns TIKU_DRV_OK.
+ *
+ * @param buf            destination word buffer (chip data lands here)
+ * @param buf_words      capacity of buf (in 32-bit words)
+ * @param out_byte_count receives packet length in bytes (0 = none)
+ */
+int cyw43_gspi_f2_rx_try(uint32_t *buf, uint32_t buf_words,
+                         uint32_t *out_byte_count);
+
+/**
+ * @brief Like _try, but polls (with 1 ms sleep between attempts)
+ *        until a packet arrives or the timeout fires.
+ */
+int cyw43_gspi_f2_rx_wait(uint32_t *buf, uint32_t buf_words,
+                          uint32_t *out_byte_count,
+                          uint32_t timeout_ms);
+
+/**
+ * @brief Send one F2 packet. `byte_count` is the wire byte count;
+ *        the helper rounds up to a whole number of words internally.
+ */
+int cyw43_gspi_f2_tx(const uint32_t *tx_words, uint32_t byte_count);
+
 /**
  * @brief Bounded poll on SPI_STATUS until `(status & mask) ==
  *        expected` or the retry budget runs out.

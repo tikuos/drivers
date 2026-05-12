@@ -17,6 +17,7 @@
 
 #include "tiku_drv_wifi_cyw43.h"
 #include "gspi.h"
+#include "whd.h"
 #include "tiku.h"
 
 #ifndef CYW43_PRINTF
@@ -66,10 +67,13 @@ cyw43_init(void)
         return TIKU_DRV_OK;
     }
 
-    /* Future phases land here:
-     *   if (cyw43_firmware_upload(...) != TIKU_DRV_OK) ...
-     *   if (cyw43_whd_init() != TIKU_DRV_OK) ...
-     */
+    /* Probe brought firmware up + HT clock. Now hand off to the
+     * WHD protocol layer for SDPCM/CDC bring-up and the phase-3+4
+     * sanity sequence. */
+    if (whd_init() != TIKU_DRV_OK) {
+        CYW43_PRINTF("WHD init failed\n");
+        return TIKU_DRV_OK;
+    }
     return TIKU_DRV_OK;
 }
 
