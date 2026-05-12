@@ -172,6 +172,10 @@ static struct {
     uint8_t    joined_ssid[32];
     uint8_t    joined_bssid[6];
     uint32_t   link_status_raw;
+
+    /* Phase 4.C diagnostic counter — number of frames the main-loop
+     * RX poll has logged so far. Capped at 20 to avoid log floods. */
+    uint8_t    rx_any_logged;
 } cyw43_state;
 
 /*---------------------------------------------------------------------------*/
@@ -264,6 +268,187 @@ static uint32_t whd_build_ioctl(uint8_t *tx_buf,
         }
     }
     return padded;
+}
+
+/*---------------------------------------------------------------------------*/
+/* Data-path: SDPCM channel-2 (DATA) frame builder + TX + RX callback       */
+/*---------------------------------------------------------------------------*/
+/*
+ * Wire layout (TX, embassy's runner.rs:773):
+ *   [SDPCM hdr   12 B]
+ *   [pad          2 B]  ← MANDATORY for data frames; without it, the
+ *                         firmware appends two zero bytes and a max-
+ *                         MTU frame ends up oversized + dropped.
+ *   [BDC hdr      4 B]  flags = BDC_VERSION(=2) << 4 = 0x20
+ *   [EthII frame N B]
+ *   [zero pad up to 4-byte boundary]
+ *
+ *   SDPCM.len            = total before pad = 12 + 2 + 4 + N
+ *   SDPCM.header_length  = 14  (SDPCM hdr + 2-byte pad)
+ *   SDPCM.channel_flags  = 0x02 (CHANNEL_TYPE_DATA)
+ *
+ * Wire layout (RX): same skeleton, except embassy's parser uses
+ *   SDPCM.header_length as the offset from the start of the SDPCM
+ *   frame to the BDC header (i.e. it accounts for the pad), so the
+ *   dispatcher skips header_length bytes then strips 4 BDC bytes.
+ */
+
+static whd_rx_eth_cb_t whd_eth_cb     = (whd_rx_eth_cb_t)0;
+static void           *whd_eth_cb_ctx = (void *)0;
+
+int whd_register_rx_callback(whd_rx_eth_cb_t cb, void *ctx)
+{
+    whd_eth_cb     = cb;
+    whd_eth_cb_ctx = ctx;
+    return TIKU_DRV_OK;
+}
+
+/* Build a CHANNEL_TYPE_DATA SDPCM frame in tx_buf. tx_buf must be at
+ * least 18 + eth_len + 3 bytes. Returns the total wire byte count
+ * (4-byte aligned). */
+static uint32_t whd_build_data_frame(uint8_t *tx_buf,
+                                     const uint8_t *eth,
+                                     uint16_t eth_len)
+{
+    uint32_t total_len = 12UL + 2UL + 4UL + (uint32_t)eth_len;
+    uint16_t inv       = (uint16_t)~(uint16_t)total_len;
+    uint32_t padded;
+    uint16_t i;
+
+    /* SDPCM header. */
+    tx_buf[0]  = (uint8_t)( total_len        & 0xFFU);
+    tx_buf[1]  = (uint8_t)((total_len >> 8 ) & 0xFFU);
+    tx_buf[2]  = (uint8_t)( inv              & 0xFFU);
+    tx_buf[3]  = (uint8_t)((inv       >> 8 ) & 0xFFU);
+    tx_buf[4]  = whd.sdpcm_seq;
+    tx_buf[5]  = 0x02U;   /* channel=2 (DATA), flags=0 */
+    tx_buf[6]  = 0U;      /* next_length */
+    tx_buf[7]  = 14U;     /* header_length = SDPCM(12) + PAD(2) */
+    tx_buf[8]  = 0U;      /* wireless flow control */
+    tx_buf[9]  = 0U;      /* bus_data_credit (TX side ignored) */
+    tx_buf[10] = 0U;      /* reserved */
+    tx_buf[11] = 0U;
+
+    /* 2-byte padding between SDPCM and BDC (required for data frames). */
+    tx_buf[12] = 0U;
+    tx_buf[13] = 0U;
+
+    /* BDC header. */
+    tx_buf[14] = 0x20U;   /* flags = BDC_VERSION(2) << 4 */
+    tx_buf[15] = 0U;      /* priority (low 3 bits = 802.1d) */
+    tx_buf[16] = 0U;      /* flags2 */
+    tx_buf[17] = 0U;      /* data_offset */
+
+    /* Ethernet frame payload. */
+    for (i = 0U; i < eth_len; ++i) {
+        tx_buf[18U + i] = eth[i];
+    }
+
+    /* Pad to multiple of 4 bytes. */
+    padded = (total_len + 3U) & ~3UL;
+    for (i = (uint16_t)total_len; i < (uint16_t)padded; ++i) {
+        tx_buf[i] = 0U;
+    }
+    return padded;
+}
+
+/* Check we have SDPCM credit for the next outbound frame. Mirrors
+ * embassy's has_credit(). */
+static int whd_has_tx_credit(void)
+{
+    return (whd.sdpcm_seq != whd.sdpcm_seq_max)
+        && (((uint8_t)(whd.sdpcm_seq_max - whd.sdpcm_seq) & 0x80U) == 0U);
+}
+
+int whd_tx_eth(const uint8_t *frame, uint16_t len)
+{
+    uint32_t bytes;
+    int      rc;
+
+    if (frame == (const uint8_t *)0
+        || len < 14U                       /* shorter than EthII header */
+        || len > WHD_DATA_MAX_FRAME) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    if ((uint32_t)len + 18UL + 3UL > WHD_TX_SCRATCH_BYTES) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    if (!whd_has_tx_credit()) {
+        /* Caller may retry after the runner has drained more RX
+         * frames (which refresh credit). Non-blocking by design — the
+         * runner's RX poll loop drives credit recovery. */
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+
+    bytes = whd_build_data_frame(whd_tx_scratch, frame, len);
+    whd.sdpcm_seq = (uint8_t)(whd.sdpcm_seq + 1U);
+
+    rc = cyw43_gspi_f2_tx((const uint32_t *)whd_tx_scratch, bytes);
+    if (rc != TIKU_DRV_OK) {
+        CYW43_PRINTF("whd_tx_eth: F2 TX FAIL rc=%d len=%u\n", rc,
+                     (unsigned)len);
+    }
+    return rc;
+}
+
+/* Inspect the frame currently in whd_rx_buf. If it's channel-2 (DATA),
+ * deliver its Ethernet body to the registered callback. Returns the
+ * channel number (0/1/2) or -1 on malformed. */
+static unsigned int whd_rx_eth_debug_logged = 0U;
+
+static int whd_rx_dispatch_data(uint16_t pkt_len)
+{
+    const uint8_t *rx = (const uint8_t *)whd_rx_buf;
+    uint8_t  channel;
+    uint8_t  hdr_off;
+
+    if (pkt_len < 12U) return -1;
+    channel = rx[5] & 0x0FU;
+    hdr_off = rx[7];
+
+    if (channel != 2U) return (int)channel;
+
+    /* Data frame layout per embassy's BdcHeader::parse:
+     *   [SDPCM hdr — header_length bytes covers SDPCM+RX-prefix]
+     *   [BDC hdr — 4 bytes; byte 3 = data_offset, in 4-byte words]
+     *   [BDC extension — data_offset*4 bytes; sometimes zero]
+     *   [Ethernet frame — what we want]
+     */
+    if (hdr_off + 4U > pkt_len) return -1;
+    {
+        uint8_t  data_off_words = rx[hdr_off + 3U];
+        uint16_t skip           = (uint16_t)hdr_off
+                                  + 4U
+                                  + ((uint16_t)data_off_words * 4U);
+        const uint8_t *eth;
+        uint16_t       elen;
+        if (skip > pkt_len) return -1;
+        eth  = rx + skip;
+        elen = (uint16_t)(pkt_len - skip);
+
+        if (elen < 14U || elen > WHD_DATA_MAX_FRAME) {
+            return -1;
+        }
+
+        /* Debug: log the first ~5 RX frames so 4.C verification can
+         * confirm the chip is actually delivering Ethernet frames.
+         * EtherType 0x0800=IPv4, 0x0806=ARP, 0x86DD=IPv6, 0x888E=EAPOL. */
+        if (whd_rx_eth_debug_logged < 5U) {
+            uint16_t etype = (uint16_t)((eth[12] << 8) | eth[13]);
+            CYW43_PRINTF("p4.C: rx-eth len=%u etype=0x%04x "
+                         "dst=%02x:%02x:%02x:%02x:%02x:%02x "
+                         "src=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                         (unsigned)elen, (unsigned)etype,
+                         eth[0], eth[1], eth[2], eth[3], eth[4], eth[5],
+                         eth[6], eth[7], eth[8], eth[9], eth[10], eth[11]);
+            whd_rx_eth_debug_logged += 1U;
+        }
+
+        if (whd_eth_cb != (whd_rx_eth_cb_t)0) {
+            whd_eth_cb(eth, elen, whd_eth_cb_ctx);
+        }
+    }
+    return 2;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -685,6 +870,44 @@ p3b_done:
                      "(phase 3.E done) ***\n",
                      iov_buf[0], iov_buf[1], iov_buf[2],
                      iov_buf[3], iov_buf[4], iov_buf[5]);
+    }
+
+    /*-----------------------------------------------------------*/
+    /* country code — required for data path to TX/RX reliably.  */
+    /*-----------------------------------------------------------*/
+    /* Without a country, the chip's regdomain is "00 XX" which on
+     * some firmwares silently drops outbound frames after assoc.
+     * CountryInfo layout: char abbrev[4] + char ccode[4] + i32 rev.
+     * Use WORLD_WIDE_XX (rev=-1) — works on any 2.4 GHz channel. */
+    {
+        static const char cn_name[] = "country";
+        uint8_t cn_buf[sizeof cn_name + 12U];
+        uint16_t i;
+        for (i = 0U; i < sizeof cn_name; ++i) cn_buf[i] = (uint8_t)cn_name[i];
+        /* abbrev "XX\0\0" */
+        cn_buf[sizeof cn_name + 0U] = 'X';
+        cn_buf[sizeof cn_name + 1U] = 'X';
+        cn_buf[sizeof cn_name + 2U] = 0U;
+        cn_buf[sizeof cn_name + 3U] = 0U;
+        /* rev (i32 LE) = -1 */
+        cn_buf[sizeof cn_name + 4U] = 0xFFU;
+        cn_buf[sizeof cn_name + 5U] = 0xFFU;
+        cn_buf[sizeof cn_name + 6U] = 0xFFU;
+        cn_buf[sizeof cn_name + 7U] = 0xFFU;
+        /* ccode "XX\0\0" */
+        cn_buf[sizeof cn_name + 8U]  = 'X';
+        cn_buf[sizeof cn_name + 9U]  = 'X';
+        cn_buf[sizeof cn_name + 10U] = 0U;
+        cn_buf[sizeof cn_name + 11U] = 0U;
+        rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
+                       cn_buf, sizeof cn_buf,
+                       (uint8_t *)0, 0U, (uint32_t *)0);
+        if (rc != TIKU_DRV_OK) {
+            CYW43_PRINTF("bring_up: SET(\"country\") FAIL rc=%d\n", rc);
+            /* non-fatal — older firmwares may not need it */
+        } else {
+            CYW43_PRINTF("bring_up: country = WORLD_WIDE_XX (rev=-1)\n");
+        }
     }
 
     /*-----------------------------------------------------------*/
@@ -1179,6 +1402,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     static unsigned int      join_polls;
     static int               join_done;
     static uint32_t          join_link_status;
+    static struct tiku_timer rx_drain_timer;
 
     TIKU_PROCESS_BEGIN();
 
@@ -1243,7 +1467,50 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     }
 
     while (1) {
-        TIKU_PROCESS_YIELD();
+        /* Wake policy: when the link is up, force a 1-tick (~7.81 ms)
+         * timed wait so the runner re-enters this loop ~128 Hz and
+         * drains any pending RX frames from the chip. Without this,
+         * the chip's F2 RX FIFO fills up after join (DHCP OFFER, ARP
+         * reply, anything inbound) and we'd never deliver them. When
+         * GPIO IRQ wake (#105) lands, swap this for an IRQ-wait.
+         *
+         * When not joined, plain YIELD is correct: no traffic to
+         * expect, so we idle-sleep until an explicit event (shell
+         * scan/connect/disconnect). */
+        if (cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED) {
+            PT_WAIT_UNTIL_TIMEOUT(process_pt, &rx_drain_timer, 0, 1U);
+        } else {
+            TIKU_PROCESS_YIELD();
+        }
+
+        /* Drain ALL pending F2 frames before yielding, so a burst of
+         * channel-1 events doesn't starve a channel-2 data frame
+         * sitting behind it in the chip's FIFO. Each iteration handles
+         * one frame; the loop exits when rx_try returns zero. Capped
+         * to 32 iterations to bound the busy-time per wake. */
+        if (cyw43_state.up && cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED) {
+            uint8_t drain_n;
+            for (drain_n = 0U; drain_n < 32U; ++drain_n) {
+                uint32_t pkt_len = 0UL;
+                (void)cyw43_gspi_f2_rx_try(whd_rx_buf,
+                                           WHD_RX_BUF_WORDS, &pkt_len);
+                if (pkt_len == 0UL) break;
+                {
+                    const uint8_t *rxb = (const uint8_t *)whd_rx_buf;
+                    sdpcm_update_credit_from_rx(rxb);
+                    /* Log the first 3 frames after join (any channel)
+                     * so it's obvious the data path is alive. Caps
+                     * at 3 to avoid log floods on busy networks. */
+                    if (cyw43_state.rx_any_logged < 3U) {
+                        CYW43_PRINTF("p4.C: rx ch=%u len=%lu\n",
+                                     (unsigned)(rxb[5] & 0x0FU),
+                                     (unsigned long)pkt_len);
+                        cyw43_state.rx_any_logged += 1U;
+                    }
+                    (void)whd_rx_dispatch_data((uint16_t)pkt_len);
+                }
+            }
+        }
 
         /* Runner-level health tick: kick the watchdog and notice
          * any MPU violation that may have happened anywhere in the

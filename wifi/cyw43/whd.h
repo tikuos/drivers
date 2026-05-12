@@ -135,6 +135,52 @@ int whd_ioctl(uint16_t kind_flags, uint32_t cmd_code, uint16_t iface,
               uint8_t *rx_data, uint32_t rx_size,
               uint32_t *rx_len_out);
 
+/*---------------------------------------------------------------------------*/
+/* Data-path API (phase 4.C)                                                 */
+/*---------------------------------------------------------------------------*/
+
+/** Maximum Ethernet payload we accept from / deliver to the chip. */
+#define WHD_DATA_MAX_FRAME 1514U
+
+/**
+ * @brief RX callback type. Invoked synchronously from the runner
+ *        process context when a channel-2 (DATA) SDPCM frame arrives.
+ *
+ *        The pointer @p frame is valid only for the duration of the
+ *        call — the callback MUST copy bytes it needs to retain. The
+ *        runner's RX buffer is overwritten on the next poll.
+ *
+ *        @p ctx is the cookie passed at registration time.
+ */
+typedef void (*whd_rx_eth_cb_t)(const uint8_t *frame, uint16_t len,
+                                void *ctx);
+
+/**
+ * @brief Register a single RX callback for Ethernet frames coming off
+ *        the chip.  Replaces any previously installed callback.
+ *        Pass cb=NULL to unregister.
+ *
+ *        Lives below the kernel surface — the link-layer adapter in
+ *        tikukits/net/wifi/ is the intended consumer.
+ */
+int whd_register_rx_callback(whd_rx_eth_cb_t cb, void *ctx);
+
+/**
+ * @brief Transmit one Ethernet frame.  Synchronous, completes when
+ *        the gSPI transfer to the chip finishes.  Returns:
+ *          TIKU_DRV_OK         on success
+ *          TIKU_DRV_ERR_INVALID  bad args / frame too big
+ *          TIKU_DRV_ERR_TIMEOUT  out of SDPCM credit (chip ahead) —
+ *                                caller may retry after RX poll
+ *          (other negative)      transport-layer failure
+ *
+ *        Frame contents are the full EthII frame (DST MAC, SRC MAC,
+ *        EtherType, payload).  The driver prepends SDPCM + BDC
+ *        headers.  Caller does not need to add FCS — the chip
+ *        computes it on the air.
+ */
+int whd_tx_eth(const uint8_t *frame, uint16_t len);
+
 #ifdef __cplusplus
 }
 #endif
