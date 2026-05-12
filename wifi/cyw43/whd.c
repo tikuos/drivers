@@ -30,6 +30,7 @@
 #include "firmware.h"
 #include "tiku.h"
 #include <arch/arm-rp2350/tiku_uart_arch.h>
+#include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
 #include <kernel/timers/tiku_timer.h>
 #include <string.h>
@@ -61,22 +62,37 @@ static struct {
 };
 
 /*---------------------------------------------------------------------------*/
-/* F2 RX BUFFER                                                              */
+/* MEMORY POOL (tiku_arena-backed)                                           */
 /*---------------------------------------------------------------------------*/
 /*
- * Single shared RX buffer for the polled IOCTL/event loop. 2 KB
- * covers the largest control/event frame on this chip. When we
- * move to ISR-driven RX with queuing (phase R.4) this turns into
- * a ring; for the current synchronous path one buffer is enough.
+ * The WHD layer's three persistent buffers — F2 RX (2 KB), TX
+ * scratch (2 KB), CLM-upload iovar buf (~1 KB) — are allocated
+ * once from a tiku_arena that the kernel registers in its region
+ * map. `ps` / region listings now see WiFi's memory budget rather
+ * than the buffers being invisible static .bss arrays.
+ *
+ * Phase 5 (RX ring) will add a tiku_pool of fixed-size packet
+ * blocks for incoming frames — the arena handles "alloc once,
+ * hold forever" allocations, the pool will handle the per-packet
+ * ring with individual free/realloc.
  */
-#define WHD_RX_BUF_WORDS 512U
-static uint32_t whd_rx_buf[WHD_RX_BUF_WORDS];
+#define WHD_RX_BUF_WORDS     512U                       /* 2 KB */
+#define WHD_TX_SCRATCH_BYTES 2048U
+#define WHD_CLM_IOV_BYTES    (8U + 12U + 1024U)         /* "clmload" + DownloadHeader + 1 KB chunk */
+#define WHD_ARENA_BYTES      (WHD_RX_BUF_WORDS * 4U  \
+                              + WHD_TX_SCRATCH_BYTES \
+                              + WHD_CLM_IOV_BYTES    \
+                              + 64U /* alignment slack */)
 
-/* Shared TX scratch buffer for IOCTL builds. Sized to the biggest
- * frame we ever send (SDPCM 12 + CDC 16 + 8-byte iovar name + 12-byte
- * download header + 1 KB chunk = ~1060 B; 2 KB leaves comfortable
- * headroom for a one-shot CLM upload). */
-static uint8_t whd_tx_scratch[2048];
+static uint8_t       whd_arena_buf[WHD_ARENA_BYTES]
+                     __attribute__((aligned(4)));
+static tiku_arena_t  whd_arena;
+
+/* Pointers populated by whd_mem_init(); used by the runner + helpers
+ * throughout the driver lifetime. */
+static uint32_t     *whd_rx_buf;
+static uint8_t      *whd_tx_scratch;
+static uint8_t      *whd_clm_iov_buf;
 
 /*---------------------------------------------------------------------------*/
 /* RUNNER STATE                                                              */
@@ -203,7 +219,7 @@ int whd_ioctl(uint16_t kind_flags, uint32_t cmd_code, uint16_t iface,
 
     if (rx_len_out != (uint32_t *)0) *rx_len_out = 0UL;
 
-    if (tx_len + 28U > sizeof whd_tx_scratch) {
+    if (tx_len + 28U > WHD_TX_SCRATCH_BYTES) {
         return TIKU_DRV_ERR_INVALID;
     }
 
@@ -460,7 +476,9 @@ p3b_done:
     /* PHASE 3.D: upload CLM (Country Locale Matrix) blob.       */
     /*-----------------------------------------------------------*/
     {
-        static uint8_t  iov_buf[8U + 12U + 1024U];
+        /* Arena-allocated buffer (whd_clm_iov_buf) instead of a
+         * static — kernel's region registry tracks the ~1 KB usage. */
+        uint8_t        *iov_buf = whd_clm_iov_buf;
         uint8_t         resp_buf[4];
         uint32_t        resp_len = 0UL;
         const uint32_t  clm_size = cyw43_clm_size;
@@ -888,8 +906,60 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 /* Public API                                                                */
 /*---------------------------------------------------------------------------*/
 
+/* Initialise the arena and carve out the three persistent buffers.
+ * Idempotent (re-init re-uses the same arena_buf). */
+static int whd_mem_init(void)
+{
+    tiku_mem_err_t err;
+
+    err = tiku_arena_create(&whd_arena, whd_arena_buf,
+                            (tiku_mem_arch_size_t)sizeof whd_arena_buf,
+                            /* id */ 0xC4U);
+    if (err != TIKU_MEM_OK) {
+        CYW43_PRINTF("whd_mem_init: tiku_arena_create err=%d\n", err);
+        return TIKU_DRV_ERR_NOT_PRESENT;
+    }
+
+    whd_rx_buf      = (uint32_t *)tiku_arena_alloc(&whd_arena,
+                          WHD_RX_BUF_WORDS * 4U);
+    whd_tx_scratch  = (uint8_t  *)tiku_arena_alloc(&whd_arena,
+                          WHD_TX_SCRATCH_BYTES);
+    whd_clm_iov_buf = (uint8_t  *)tiku_arena_alloc(&whd_arena,
+                          WHD_CLM_IOV_BYTES);
+
+    if (whd_rx_buf == (uint32_t *)0
+        || whd_tx_scratch  == (uint8_t *)0
+        || whd_clm_iov_buf == (uint8_t *)0) {
+        CYW43_PRINTF("whd_mem_init: arena alloc FAIL "
+                     "(rx=%p tx=%p clm=%p)\n",
+                     (void *)whd_rx_buf,
+                     (void *)whd_tx_scratch,
+                     (void *)whd_clm_iov_buf);
+        /* DRV-layer doesn't have a NOMEM code; INVALID is the closest
+         * "we asked for something the system can't give us" signal. */
+        return TIKU_DRV_ERR_INVALID;
+    }
+
+    {
+        tiku_mem_stats_t s;
+        if (tiku_arena_stats(&whd_arena, &s) == TIKU_MEM_OK) {
+            CYW43_PRINTF("whd_mem_init: arena id=0xC4  "
+                         "used=%lu/%lu B  peak=%lu  allocs=%lu\n",
+                         (unsigned long)s.used_bytes,
+                         (unsigned long)s.total_bytes,
+                         (unsigned long)s.peak_bytes,
+                         (unsigned long)s.alloc_count);
+        }
+    }
+    return TIKU_DRV_OK;
+}
+
 int whd_runner_init(void)
 {
+    int rc = whd_mem_init();
+    if (rc != TIKU_DRV_OK) {
+        return rc;
+    }
     tiku_process_start(&cyw43_runner, NULL);
     return TIKU_DRV_OK;
 }
