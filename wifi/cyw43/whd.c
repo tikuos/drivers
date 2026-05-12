@@ -30,6 +30,7 @@
 #include "firmware.h"
 #include "tiku.h"
 #include <arch/arm-rp2350/tiku_uart_arch.h>
+#include <interfaces/led/tiku_led.h>
 #include <kernel/cpu/tiku_watchdog.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
@@ -141,6 +142,11 @@ static struct {
     uint8_t  scan_in_progress;
     uint16_t scan_aps_found;
     uint8_t  mac[6];
+    /* Last completed scan's deduplicated AP table. The runner
+     * appends here during scan; subscribers iterate after the
+     * CYW43_WIFI_EVT_SCAN_COMPLETE broadcast. */
+    uint8_t    scan_count;
+    cyw43_ap_t scan_results[CYW43_MAX_SCAN_RESULTS];
 } cyw43_state;
 
 /*---------------------------------------------------------------------------*/
@@ -803,20 +809,64 @@ static int whd_scan_process_frame(unsigned int *aps_seen_inout)
         int16_t        rssi    = (int16_t)((uint16_t)bss[78]
                                           | ((uint16_t)bss[79] << 8));
         uint16_t       i;
+        cyw43_ap_t    *slot     = (cyw43_ap_t *)0;
+        int            dup_idx  = -1;
+
         *aps_seen_inout += 1U;
-        CYW43_PRINTF("p4.A: AP #%u  BSSID=%02x:%02x:%02x:%02x:%02x:%02x "
-                     " RSSI=%d  ch=%u  SSID=",
-                     *aps_seen_inout,
-                     bssid[0], bssid[1], bssid[2],
-                     bssid[3], bssid[4], bssid[5],
-                     (int)rssi, chanspec & 0xFFU);
+
+        /* Dedup by BSSID against the running scan table. If the same
+         * BSSID already has an entry, update RSSI if the new one is
+         * stronger and skip the append (avoids the 8x repeats of the
+         * dominant AP we used to print). */
         if (ssid_l > 32U) ssid_l = 32U;
-        for (i = 0U; i < ssid_l; ++i) {
-            char c = (char)ssid[i];
-            if (c >= 0x20 && c < 0x7F) tiku_uart_putc(c);
-            else                       tiku_uart_putc('.');
+        for (i = 0U; i < cyw43_state.scan_count; ++i) {
+            int match = 1;
+            uint8_t k;
+            for (k = 0U; k < 6U; ++k) {
+                if (cyw43_state.scan_results[i].bssid[k] != bssid[k]) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (match) { dup_idx = (int)i; break; }
         }
-        tiku_uart_putc('\n');
+
+        if (dup_idx >= 0) {
+            slot = &cyw43_state.scan_results[dup_idx];
+            if (rssi > slot->rssi) slot->rssi = rssi;
+        } else if (cyw43_state.scan_count < CYW43_MAX_SCAN_RESULTS) {
+            slot = &cyw43_state.scan_results[cyw43_state.scan_count++];
+            slot->ssid_len = ssid_l;
+            for (i = 0U; i < ssid_l; ++i) slot->ssid[i] = ssid[i];
+            for (i = ssid_l; i < 32U; ++i) slot->ssid[i] = 0U;
+            for (i = 0U; i < 6U; ++i) slot->bssid[i] = bssid[i];
+            slot->rssi    = rssi;
+            slot->channel = (uint8_t)(chanspec & 0xFFU);
+            slot->_pad    = 0U;
+        }
+
+        /* Inline log + AP_FOUND broadcast on the FIRST sighting only. */
+        if (dup_idx < 0 && slot != (cyw43_ap_t *)0) {
+            CYW43_PRINTF("p4.A: AP #%u  BSSID=%02x:%02x:%02x:%02x:%02x:%02x "
+                         " RSSI=%d  ch=%u  SSID=",
+                         cyw43_state.scan_count,
+                         bssid[0], bssid[1], bssid[2],
+                         bssid[3], bssid[4], bssid[5],
+                         (int)rssi, chanspec & 0xFFU);
+            for (i = 0U; i < ssid_l; ++i) {
+                char c = (char)ssid[i];
+                if (c >= 0x20 && c < 0x7F) tiku_uart_putc(c);
+                else                       tiku_uart_putc('.');
+            }
+            tiku_uart_putc('\n');
+
+            /* Fan out the per-AP discovery event so subscribers (shell
+             * scan command, future IP-config logic, etc.) can react.
+             * data carries a pointer to the just-added scan_results
+             * entry; the pointer is stable until the next scan starts. */
+            (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                    CYW43_WIFI_EVT_AP_FOUND, slot);
+        }
     }
     return 0;
 }
@@ -886,9 +936,20 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     (void)data;
     runner_mpu_baseline = tiku_mpu_get_violation_count();
 
+    /* LED 0 (board-defined; index 0 is the heartbeat LED on the
+     * Pi Pico 2 W external LED pad). Initialised here so the runner
+     * can blink it during scans / leave it solid on link-up. If the
+     * board has no LED, tiku_led_* is a no-op. */
+    if (tiku_led_count() > 0U) {
+        tiku_led_init(0U);
+        tiku_led_off(0U);
+    }
+
     CYW43_PRINTF("runner: starting WHD bring-up\n");
     if (whd_bring_up() == TIKU_DRV_OK) {
         cyw43_state.up = 1U;
+        /* Solid LED = WHD ready. */
+        if (tiku_led_count() > 0U) tiku_led_on(0U);
         /* Self-post the first SCAN_START to demonstrate the event
          * path. Once a shell command + user-facing API land (phase
          * R.5), this auto-scan can be removed. */
@@ -910,6 +971,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
         if (ev == CYW43_WIFI_EVT_SCAN_START && cyw43_state.up) {
             CYW43_PRINTF("runner: SCAN_START — starting active scan\n");
             cyw43_state.scan_in_progress = 1U;
+            cyw43_state.scan_count       = 0U;  /* clear table for fresh scan */
 
             scan_rc = whd_scan_send_iovar();
             if (scan_rc != TIKU_DRV_OK) {
@@ -962,7 +1024,17 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 
                 PT_WAIT_UNTIL_TIMEOUT(process_pt, &scan_timer,
                                       scan_done, 1U);
+
+                /* Visible scan-in-progress indication: blink the LED
+                 * each iteration. With the 1-tick yield above this is
+                 * roughly 128 toggles/sec = 64 Hz square wave — fast
+                 * enough to look like "solid + flickering," dim enough
+                 * to be visibly different from solid-on. */
+                if (tiku_led_count() > 0U) tiku_led_toggle(0U);
             }
+
+            /* Scan done — restore LED to solid (WiFi-up indicator). */
+            if (tiku_led_count() > 0U) tiku_led_on(0U);
 
             if (!scan_done) {
                 CYW43_PRINTF("p4.A: scan poll budget exhausted "
@@ -975,6 +1047,16 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 
             cyw43_state.scan_aps_found   = (uint16_t)scan_aps;
             cyw43_state.scan_in_progress = 0U;
+
+            /* Fan out scan-complete to anyone subscribed. Payload =
+             * the deduplicated AP count (= scan_count), squeezed
+             * into the event-data pointer slot. Subscribers can
+             * also call cyw43_wifi_scan_results() to pull the
+             * actual table. */
+            (void)tiku_process_post(
+                TIKU_PROCESS_BROADCAST,
+                CYW43_WIFI_EVT_SCAN_COMPLETE,
+                (tiku_event_data_t)(uintptr_t)cyw43_state.scan_count);
         }
         /* Future: CYW43_WIFI_EVT_JOIN_START, _DISCONNECT, etc. */
     }
@@ -1068,4 +1150,15 @@ int cyw43_wifi_status(cyw43_wifi_status_t *out)
     out->scan_aps_found   = cyw43_state.scan_aps_found;
     for (i = 0; i < 6; ++i) out->mac[i] = cyw43_state.mac[i];
     return TIKU_DRV_OK;
+}
+
+uint8_t cyw43_wifi_scan_results(cyw43_ap_t *out, uint8_t max_results)
+{
+    uint8_t i;
+    uint8_t n;
+    if (out == (cyw43_ap_t *)0 || max_results == 0U) return 0U;
+    n = cyw43_state.scan_count;
+    if (n > max_results) n = max_results;
+    for (i = 0U; i < n; ++i) out[i] = cyw43_state.scan_results[i];
+    return n;
 }

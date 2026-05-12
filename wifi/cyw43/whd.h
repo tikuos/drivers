@@ -58,13 +58,43 @@ extern "C" {
 /* Runner-process events                                                     */
 /*---------------------------------------------------------------------------*/
 
-/* Events posted to the cyw43_runner process. Values share the user-
- * event namespace starting at TIKU_EVENT_USER (0x10). */
-#define CYW43_WIFI_EVT_SCAN_START  (TIKU_EVENT_USER + 0U)
+/* Events. CYW43_WIFI_EVT_SCAN_START is the only one posted INTO the
+ * runner (by external callers requesting a scan). The remaining
+ * events are broadcast OUT from the runner via TIKU_PROCESS_BROADCAST
+ * so any subscribed process (shell, IP stack, user app) can react.
+ *
+ * Event data:
+ *   SCAN_START      : NULL
+ *   SCAN_COMPLETE   : (void*) (uintptr_t) ap_count
+ *   AP_FOUND        : pointer to a (transient) cyw43_ap_t in the
+ *                     runner's scan_results[] array; valid until
+ *                     the next AP_FOUND event or scan-complete
+ *   LINK_UP         : (void*) (uintptr_t) link reason code
+ *   LINK_DOWN       : (void*) (uintptr_t) link reason code
+ */
+#define CYW43_WIFI_EVT_SCAN_START     (TIKU_EVENT_USER + 0U)
+#define CYW43_WIFI_EVT_SCAN_COMPLETE  (TIKU_EVENT_USER + 1U)
+#define CYW43_WIFI_EVT_AP_FOUND       (TIKU_EVENT_USER + 2U)
+#define CYW43_WIFI_EVT_LINK_UP        (TIKU_EVENT_USER + 3U)
+#define CYW43_WIFI_EVT_LINK_DOWN      (TIKU_EVENT_USER + 4U)
 
 /*---------------------------------------------------------------------------*/
 /* Public status snapshot                                                    */
 /*---------------------------------------------------------------------------*/
+
+/* One discovered access point. The runner accumulates these into
+ * a small bounded array during a scan; the shell + any subscriber
+ * iterates them after SCAN_COMPLETE. */
+#define CYW43_MAX_SCAN_RESULTS 16U
+
+typedef struct {
+    uint8_t  bssid[6];        /* 802.11 BSSID */
+    uint8_t  ssid_len;        /* 0..32 */
+    uint8_t  ssid[32];        /* not null-terminated */
+    int16_t  rssi;            /* dBm */
+    uint8_t  channel;         /* 1..13 (2.4 GHz) */
+    uint8_t  _pad;            /* explicit pad to keep size predictable */
+} cyw43_ap_t;
 
 typedef struct {
     uint8_t  up;              /* 1 after whd bring-up completes */
@@ -106,6 +136,15 @@ int cyw43_wifi_scan_start(void);
  * @brief Snapshot the WHD layer's state. Synchronous read.
  */
 int cyw43_wifi_status(cyw43_wifi_status_t *out);
+
+/**
+ * @brief Read the last scan's accumulated results.
+ *
+ * Copies up to `max_results` deduplicated APs (keyed by BSSID)
+ * into @p out. Returns the actual count written (0 if no scan
+ * has completed yet).
+ */
+uint8_t cyw43_wifi_scan_results(cyw43_ap_t *out, uint8_t max_results);
 
 /**
  * @brief Issue one CDC IOCTL and wait for its matching response.
