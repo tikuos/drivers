@@ -30,6 +30,7 @@
 #include "firmware.h"
 #include "tiku.h"
 #include <arch/arm-rp2350/tiku_uart_arch.h>
+#include <kernel/process/tiku_process.h>
 #include <string.h>
 
 #ifndef CYW43_PRINTF
@@ -75,6 +76,21 @@ static uint32_t whd_rx_buf[WHD_RX_BUF_WORDS];
  * download header + 1 KB chunk = ~1060 B; 2 KB leaves comfortable
  * headroom for a one-shot CLM upload). */
 static uint8_t whd_tx_scratch[2048];
+
+/*---------------------------------------------------------------------------*/
+/* RUNNER STATE                                                              */
+/*---------------------------------------------------------------------------*/
+/* Cached snapshot of the chip's bring-up state. Read by anyone via
+ * cyw43_wifi_status(); written by the runner protothread. The fields
+ * are independent uint reads, so the lack of locking is safe under
+ * cooperative scheduling (other processes only run at YIELD points,
+ * which the runner doesn't hit while it's updating these). */
+static struct {
+    uint8_t  up;
+    uint8_t  scan_in_progress;
+    uint16_t scan_aps_found;
+    uint8_t  mac[6];
+} cyw43_state;
 
 /*---------------------------------------------------------------------------*/
 /* SDPCM credit update                                                       */
@@ -268,19 +284,21 @@ int whd_ioctl(uint16_t kind_flags, uint32_t cmd_code, uint16_t iface,
 }
 
 /*---------------------------------------------------------------------------*/
-/* whd_init — phases 3.A through 4.A                                         */
+/* whd_bring_up — phases 3.A through 3.E + event_msgs + WLC_UP               */
 /*---------------------------------------------------------------------------*/
 /*
  * Pre-condition: chip's firmware is running (cyw43_gspi_probe_chip_id
- * returned OK and HT clock came up). This function brings up the
- * WHD layer to the point where an IOCTL exchange works, then runs
- * a single active scan as a sanity check.
+ * returned OK and HT clock came up). This function brings the WHD
+ * layer up to "radio is enabled, events are routed, scan/join are
+ * ready to call." It is synchronous (busy-waits on chip responses)
+ * and is intended to be called from the cyw43_runner protothread's
+ * first dispatch.
  *
- * Phase R.2 will turn this into a process: the synchronous init
- * still runs to "radio defaults" but the event-channel reader +
- * scan move into the runner loop.
+ * Phase R.3 will swap the internal busy-waits for tiku_timer-based
+ * yields so the protothread doesn't monopolise the CPU during the
+ * one-time bring-up.
  */
-int whd_init(void)
+static int whd_bring_up(void)
 {
     int rc;
 
@@ -575,6 +593,10 @@ p3b_done:
                          (unsigned long)resp_len);
             return TIKU_DRV_ERR_NOT_PRESENT;
         }
+        {
+            int j;
+            for (j = 0; j < 6; ++j) cyw43_state.mac[j] = iov_buf[j];
+        }
         CYW43_PRINTF("p3.E: *** MAC = %02x:%02x:%02x:%02x:%02x:%02x "
                      "(phase 3.E done) ***\n",
                      iov_buf[0], iov_buf[1], iov_buf[2],
@@ -582,113 +604,54 @@ p3b_done:
     }
 
     /*-----------------------------------------------------------*/
-    /* PHASE 3.F: event_msgs + WLC_UP + drain a few events.      */
+    /* event_msgs SET + WLC_UP — radio is now scannable.         */
     /*-----------------------------------------------------------*/
+    /* The old phase 3.F also drained a few events to verify the
+     * parser; that test moved to a side-effect of whd_scan_once()
+     * (every scan emits a burst of events). */
     {
-        const uint8_t *rx_buf = (const uint8_t *)whd_rx_buf;
-        unsigned int   polls;
-        unsigned int   events_seen = 0U;
-
-        {
-            static const char ev_name[] = "event_msgs";
-            uint8_t  ev_buf[sizeof ev_name + 24U];
-            uint16_t i;
-            for (i = 0U; i < sizeof ev_name; ++i) ev_buf[i] = (uint8_t)ev_name[i];
-            for (i = 0U; i < 24U; ++i) ev_buf[sizeof ev_name + i] = 0xFFU;
-            rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
-                           ev_buf, sizeof ev_buf,
-                           (uint8_t *)0, 0U, (uint32_t *)0);
-            if (rc != TIKU_DRV_OK) {
-                CYW43_PRINTF("p3.F: SET(\"event_msgs\") FAIL rc=%d\n", rc);
-                return rc;
-            }
-            CYW43_PRINTF("p3.F: event_msgs enabled (all events on)\n");
-        }
-
-        rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_UP, 0U,
-                       (const uint8_t *)0, 0U,
+        static const char ev_name[] = "event_msgs";
+        uint8_t  ev_buf[sizeof ev_name + 24U];
+        uint16_t i;
+        for (i = 0U; i < sizeof ev_name; ++i) ev_buf[i] = (uint8_t)ev_name[i];
+        for (i = 0U; i < 24U; ++i) ev_buf[sizeof ev_name + i] = 0xFFU;
+        rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
+                       ev_buf, sizeof ev_buf,
                        (uint8_t *)0, 0U, (uint32_t *)0);
         if (rc != TIKU_DRV_OK) {
-            CYW43_PRINTF("p3.F: WLC_UP failed rc=%d\n", rc);
+            CYW43_PRINTF("bring_up: SET(\"event_msgs\") FAIL rc=%d\n", rc);
             return rc;
         }
-        CYW43_PRINTF("p3.F: WLC_UP ok, polling for events...\n");
-
-        for (polls = 0U; polls < 200U; ++polls) {
-            uint32_t rx_pkt = 0UL;
-            (void)cyw43_gspi_f2_rx_try(whd_rx_buf, WHD_RX_BUF_WORDS, &rx_pkt);
-            if (rx_pkt == 0U) {
-                tiku_common_delay_ms(2U);
-                continue;
-            }
-            sdpcm_update_credit_from_rx(rx_buf);
-
-            {
-                uint8_t  ch        = rx_buf[5] & 0xFU;
-                uint16_t sdpcm_len = (uint16_t)(rx_buf[0] | (rx_buf[1] << 8));
-                uint8_t  hdr_off   = rx_buf[7];
-
-                if (ch != 1U) {
-                    CYW43_PRINTF("p3.F: drop ch=%u (%u B)\n",
-                                 ch, sdpcm_len);
-                    continue;
-                }
-                if ((uint32_t)hdr_off + 4U + 4U + 14U + 10U + 48U
-                    > sdpcm_len) {
-                    CYW43_PRINTF("p3.F: ch=1 frame too short "
-                                 "(sdpcm_len=%u hdr_off=%u)\n",
-                                 sdpcm_len, hdr_off);
-                    continue;
-                }
-                {
-                    const uint8_t *bdc       = rx_buf + hdr_off;
-                    uint8_t        data_off  = bdc[3];
-                    const uint8_t *eth       = bdc + 4U + ((uint32_t)data_off * 4U);
-                    uint16_t       eth_type  = (uint16_t)((eth[12] << 8) | eth[13]);
-                    const uint8_t *evh       = eth + 14U;
-                    uint16_t evh_subtype     = (uint16_t)((evh[0] << 8) | evh[1]);
-                    uint16_t evh_user_sub    = (uint16_t)((evh[8] << 8) | evh[9]);
-                    const uint8_t *msg       = evh + 10U;
-                    uint32_t event_type =
-                          ((uint32_t)msg[4] << 24)
-                        | ((uint32_t)msg[5] << 16)
-                        | ((uint32_t)msg[6] <<  8)
-                        |  (uint32_t)msg[7];
-                    uint32_t status =
-                          ((uint32_t)msg[8] << 24)
-                        | ((uint32_t)msg[9] << 16)
-                        | ((uint32_t)msg[10] << 8)
-                        |  (uint32_t)msg[11];
-
-                    if (eth_type != 0x886CU || evh_user_sub != 1U) {
-                        CYW43_PRINTF("p3.F: unexpected event framing "
-                                     "(eth_type=0x%04x user_sub=%u "
-                                     "evh_subtype=%u)\n",
-                                     eth_type, evh_user_sub, evh_subtype);
-                        continue;
-                    }
-                    events_seen += 1U;
-                    CYW43_PRINTF("p3.F: EVENT type=%lu status=0x%lx "
-                                 "(frame %u B, seq=%u)\n",
-                                 (unsigned long)event_type,
-                                 (unsigned long)status,
-                                 sdpcm_len, rx_buf[4]);
-                }
-            }
-            polls = 0U; /* extend budget after a real event */
-        }
-        if (events_seen == 0U) {
-            CYW43_PRINTF("p3.F: no events drained in the time window\n");
-        } else {
-            CYW43_PRINTF("p3.F: *** %u event(s) parsed — phase 3.F done ***\n",
-                         events_seen);
-        }
+        CYW43_PRINTF("bring_up: event_msgs enabled\n");
     }
 
-    /*-----------------------------------------------------------*/
-    /* PHASE 4.A: active scan, parse ESCAN_RESULT events.        */
-    /*-----------------------------------------------------------*/
-    {
+    rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_UP, 0U,
+                   (const uint8_t *)0, 0U,
+                   (uint8_t *)0, 0U, (uint32_t *)0);
+    if (rc != TIKU_DRV_OK) {
+        CYW43_PRINTF("bring_up: WLC_UP failed rc=%d\n", rc);
+        return rc;
+    }
+    CYW43_PRINTF("bring_up: WLC_UP ok — *** WHD ready ***\n");
+
+    return TIKU_DRV_OK;
+}
+
+/*---------------------------------------------------------------------------*/
+/* whd_scan_once — phase 4.A as an on-demand action                          */
+/*---------------------------------------------------------------------------*/
+/*
+ * Trigger one active scan across all channels and drain events
+ * until the chip emits a scan-complete (status=0) ESCAN_RESULT.
+ * Returns the number of PARTIAL events parsed (= one per beacon /
+ * probe-response observed during the dwell window).
+ *
+ * Synchronous — meant to be called from the runner protothread.
+ * Future: stream BSS results out as kernel events instead of
+ * printing inline; deduplicate by BSSID; non-blocking variant.
+ */
+static unsigned int whd_scan_once(void)
+{
         static const char escan_name[] = "escan";
         static uint8_t    scan_iov[sizeof escan_name + 76U];
         const uint8_t    *rx_buf = (const uint8_t *)whd_rx_buf;
@@ -697,6 +660,7 @@ p3b_done:
         unsigned int      polls;
         unsigned int      aps_seen = 0U;
         int               scan_done = 0;
+        int               rc;
 
         for (i = 0U; i < sizeof escan_name; ++i) scan_iov[off++] = (uint8_t)escan_name[i];
 
@@ -817,7 +781,93 @@ p3b_done:
             CYW43_PRINTF("p4.A: *** scan done — %u AP%s discovered ***\n",
                          aps_seen, aps_seen == 1U ? "" : "s");
         }
+
+        return aps_seen;
+}
+
+/*---------------------------------------------------------------------------*/
+/* RUNNER PROCESS                                                            */
+/*---------------------------------------------------------------------------*/
+/*
+ * cyw43_runner is the TikuOS process that owns the WHD layer. Its
+ * first dispatch runs whd_bring_up() synchronously (busy-wait on
+ * chip responses); after that the protothread sits in an event
+ * loop, doing scans / future joins on demand.
+ *
+ * Why a process rather than inline driver init: it lets the rest
+ * of the system address the WHD layer asynchronously (post a
+ * CYW43_WIFI_EVT_* event, get a result later), and gives us a
+ * natural home for phase R.3's timer-yield-based delays + phase
+ * R.6's GPIO-IRQ-driven wake.
+ */
+TIKU_PROCESS(cyw43_runner, "wifi-cyw43");
+
+TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
+{
+    TIKU_PROCESS_BEGIN();
+
+    (void)data;
+
+    CYW43_PRINTF("runner: starting WHD bring-up\n");
+    if (whd_bring_up() == TIKU_DRV_OK) {
+        cyw43_state.up = 1U;
+        /* Demonstrate the event path: self-post a SCAN_START so the
+         * boot-time sanity scan still happens automatically. Once a
+         * shell command + user-facing API land (phase R.5), this
+         * auto-scan can be removed. */
+        (void)tiku_process_post(&cyw43_runner,
+                                CYW43_WIFI_EVT_SCAN_START, NULL);
+    } else {
+        CYW43_PRINTF("runner: WHD bring-up failed — runner idle\n");
     }
 
+    while (1) {
+        TIKU_PROCESS_YIELD();
+
+        if (ev == CYW43_WIFI_EVT_SCAN_START && cyw43_state.up) {
+            CYW43_PRINTF("runner: SCAN_START — starting active scan\n");
+            cyw43_state.scan_in_progress = 1U;
+            cyw43_state.scan_aps_found   = (uint16_t)whd_scan_once();
+            cyw43_state.scan_in_progress = 0U;
+        }
+        /* Future: CYW43_WIFI_EVT_JOIN_START, _DISCONNECT, etc. */
+    }
+
+    TIKU_PROCESS_END();
+}
+
+/*---------------------------------------------------------------------------*/
+/* Public API                                                                */
+/*---------------------------------------------------------------------------*/
+
+int whd_runner_init(void)
+{
+    tiku_process_start(&cyw43_runner, NULL);
+    return TIKU_DRV_OK;
+}
+
+int cyw43_wifi_scan_start(void)
+{
+    if (!cyw43_state.up) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    if (cyw43_state.scan_in_progress) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+    return tiku_process_post(&cyw43_runner,
+                             CYW43_WIFI_EVT_SCAN_START, NULL)
+           ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
+}
+
+int cyw43_wifi_status(cyw43_wifi_status_t *out)
+{
+    int i;
+    if (out == (cyw43_wifi_status_t *)0) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    out->up               = cyw43_state.up;
+    out->scan_in_progress = cyw43_state.scan_in_progress;
+    out->scan_aps_found   = cyw43_state.scan_aps_found;
+    for (i = 0; i < 6; ++i) out->mac[i] = cyw43_state.mac[i];
     return TIKU_DRV_OK;
 }

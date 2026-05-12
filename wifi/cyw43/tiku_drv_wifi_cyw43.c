@@ -67,11 +67,13 @@ cyw43_init(void)
         return TIKU_DRV_OK;
     }
 
-    /* Probe brought firmware up + HT clock. Now hand off to the
-     * WHD protocol layer for SDPCM/CDC bring-up and the phase-3+4
-     * sanity sequence. */
-    if (whd_init() != TIKU_DRV_OK) {
-        CYW43_PRINTF("WHD init failed\n");
+    /* Probe brought firmware up + HT clock. Hand off to the WHD
+     * runner process — it owns the SDPCM/CDC bring-up and the
+     * event-driven loop above it. The runner runs whd_bring_up()
+     * synchronously on its first dispatch, then sits waiting for
+     * CYW43_WIFI_EVT_* events. */
+    if (whd_runner_init() != TIKU_DRV_OK) {
+        CYW43_PRINTF("WHD runner init failed\n");
         return TIKU_DRV_OK;
     }
     return TIKU_DRV_OK;
