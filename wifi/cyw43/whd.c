@@ -31,6 +31,7 @@
 #include "tiku.h"
 #include <arch/arm-rp2350/tiku_uart_arch.h>
 #include <kernel/process/tiku_process.h>
+#include <kernel/timers/tiku_timer.h>
 #include <string.h>
 
 #ifndef CYW43_PRINTF
@@ -638,151 +639,134 @@ p3b_done:
 }
 
 /*---------------------------------------------------------------------------*/
-/* whd_scan_once — phase 4.A as an on-demand action                          */
+/* Scan helpers — split into iovar-send + per-frame parser                   */
 /*---------------------------------------------------------------------------*/
 /*
- * Trigger one active scan across all channels and drain events
- * until the chip emits a scan-complete (status=0) ESCAN_RESULT.
- * Returns the number of PARTIAL events parsed (= one per beacon /
- * probe-response observed during the dwell window).
- *
- * Synchronous — meant to be called from the runner protothread.
- * Future: stream BSS results out as kernel events instead of
- * printing inline; deduplicate by BSSID; non-blocking variant.
+ * Phase R.3 moved the drain loop out of this file into the runner
+ * protothread (whd.c::cyw43_runner) so the runner can yield to the
+ * scheduler between F2 polls instead of busy-waiting. These two
+ * helpers are the synchronous building blocks the runner uses.
  */
-static unsigned int whd_scan_once(void)
+
+/* Build + send the "escan" SetVar IOCTL. Returns TIKU_DRV_OK on
+ * the chip's ack; chip then drips ESCAN_RESULT events on channel 1
+ * until the scan completes (status=0). */
+static int whd_scan_send_iovar(void)
 {
-        static const char escan_name[] = "escan";
-        static uint8_t    scan_iov[sizeof escan_name + 76U];
-        const uint8_t    *rx_buf = (const uint8_t *)whd_rx_buf;
-        uint16_t          off = 0U;
-        uint16_t          i;
-        unsigned int      polls;
-        unsigned int      aps_seen = 0U;
-        int               scan_done = 0;
-        int               rc;
+    static const char escan_name[] = "escan";
+    static uint8_t    scan_iov[sizeof escan_name + 76U];
+    uint16_t off = 0U;
+    uint16_t i;
+    int      rc;
 
-        for (i = 0U; i < sizeof escan_name; ++i) scan_iov[off++] = (uint8_t)escan_name[i];
+    for (i = 0U; i < sizeof escan_name; ++i) scan_iov[off++] = (uint8_t)escan_name[i];
 
-        /* version=1, action=1, sync_id=1 */
-        scan_iov[off++] = 1U; scan_iov[off++] = 0U;
-        scan_iov[off++] = 0U; scan_iov[off++] = 0U;
-        scan_iov[off++] = 1U; scan_iov[off++] = 0U;
-        scan_iov[off++] = 1U; scan_iov[off++] = 0U;
+    /* ScanParams (76 B): version=1, action=1, sync_id=1, ssid_len=0,
+     * ssid=zeros, bssid=ff..ff, bss_type=2, scan_type=0 (active),
+     * nprobes/active/passive/home_time = -1, channel_num=0,
+     * channel_list=[0]. */
+    scan_iov[off++] = 1U; scan_iov[off++] = 0U;
+    scan_iov[off++] = 0U; scan_iov[off++] = 0U;
+    scan_iov[off++] = 1U; scan_iov[off++] = 0U;
+    scan_iov[off++] = 1U; scan_iov[off++] = 0U;
 
-        for (i = 0U; i < 4U + 32U; ++i) scan_iov[off++] = 0U;
-        for (i = 0U; i < 6U; ++i) scan_iov[off++] = 0xFFU;
-        scan_iov[off++] = 2U;  /* bss_type=any */
-        scan_iov[off++] = 0U;  /* scan_type=active */
-        for (i = 0U; i < 16U; ++i) scan_iov[off++] = 0xFFU;
-        for (i = 0U; i < 6U; ++i) scan_iov[off++] = 0U;
+    for (i = 0U; i < 4U + 32U; ++i) scan_iov[off++] = 0U;
+    for (i = 0U; i < 6U; ++i)      scan_iov[off++] = 0xFFU;
+    scan_iov[off++] = 2U;
+    scan_iov[off++] = 0U;
+    for (i = 0U; i < 16U; ++i)     scan_iov[off++] = 0xFFU;
+    for (i = 0U; i < 6U; ++i)      scan_iov[off++] = 0U;
 
-        CYW43_PRINTF("p4.A: triggering active scan (all channels, %u-byte "
-                     "iovar)\n", off);
-        rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
-                       scan_iov, off,
-                       (uint8_t *)0, 0U, (uint32_t *)0);
-        if (rc != TIKU_DRV_OK) {
-            CYW43_PRINTF("p4.A: escan SET FAIL rc=%d\n", rc);
-            return rc;
-        }
+    CYW43_PRINTF("p4.A: triggering active scan (all channels, %u-byte "
+                 "iovar)\n", off);
+    rc = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
+                   scan_iov, off,
+                   (uint8_t *)0, 0U, (uint32_t *)0);
+    if (rc != TIKU_DRV_OK) {
+        CYW43_PRINTF("p4.A: escan SET FAIL rc=%d\n", rc);
+    } else {
         CYW43_PRINTF("p4.A: scan started, listening for results...\n");
+    }
+    return rc;
+}
 
-        for (polls = 0U; polls < 3000U && !scan_done; ++polls) {
-            uint32_t pkt_len = 0UL;
-            (void)cyw43_gspi_f2_rx_try(whd_rx_buf, WHD_RX_BUF_WORDS, &pkt_len);
-            if (pkt_len == 0U) {
-                tiku_common_delay_ms(2U);
-                continue;
-            }
-            sdpcm_update_credit_from_rx(rx_buf);
+/* Parse the frame currently sitting in whd_rx_buf. Return value:
+ *   +1  scan-complete event (status=0): runner can stop polling
+ *    0  AP discovered (printed inline); caller may want to reset
+ *       its poll-budget after this
+ *   -1  unrelated/incomplete frame; caller should keep draining
+ */
+static int whd_scan_process_frame(unsigned int *aps_seen_inout)
+{
+    const uint8_t *rx_buf = (const uint8_t *)whd_rx_buf;
+    uint8_t  ch       = rx_buf[5] & 0xFU;
+    uint16_t sdpcm_lc = (uint16_t)(rx_buf[0] | (rx_buf[1] << 8));
+    uint8_t  hdr_off  = rx_buf[7];
+    const uint8_t *bdc, *eth, *evh, *msg, *event_data;
+    uint16_t ether_type, evh_user_sub;
+    uint32_t ev_type, ev_status, ev_datalen;
 
-            {
-                uint8_t  ch       = rx_buf[5] & 0xFU;
-                uint16_t sdpcm_lc = (uint16_t)(rx_buf[0] | (rx_buf[1] << 8));
-                uint8_t  hdr_off  = rx_buf[7];
-                const uint8_t *bdc, *eth, *evh, *msg, *event_data;
-                uint16_t ether_type, evh_user_sub;
-                uint32_t ev_type, ev_status, ev_datalen;
+    if (ch != 1U) return -1;
+    if ((uint32_t)hdr_off + 4U + 14U + 10U + 48U > sdpcm_lc) return -1;
 
-                if (ch != 1U) continue;
-                if ((uint32_t)hdr_off + 4U + 14U + 10U + 48U > sdpcm_lc) continue;
+    bdc          = rx_buf + hdr_off;
+    eth          = bdc + 4U + ((uint32_t)bdc[3] * 4U);
+    ether_type   = (uint16_t)((eth[12] << 8) | eth[13]);
+    evh          = eth + 14U;
+    evh_user_sub = (uint16_t)((evh[8] << 8) | evh[9]);
+    msg          = evh + 10U;
+    ev_type      =  ((uint32_t)msg[4]  << 24) | ((uint32_t)msg[5]  << 16)
+                 |  ((uint32_t)msg[6]  <<  8) |  (uint32_t)msg[7];
+    ev_status    =  ((uint32_t)msg[8]  << 24) | ((uint32_t)msg[9]  << 16)
+                 |  ((uint32_t)msg[10] <<  8) |  (uint32_t)msg[11];
+    ev_datalen   =  ((uint32_t)msg[20] << 24) | ((uint32_t)msg[21] << 16)
+                 |  ((uint32_t)msg[22] <<  8) |  (uint32_t)msg[23];
+    event_data   = msg + 48U;
 
-                bdc        = rx_buf + hdr_off;
-                eth        = bdc + 4U + ((uint32_t)bdc[3] * 4U);
-                ether_type = (uint16_t)((eth[12] << 8) | eth[13]);
-                evh        = eth + 14U;
-                evh_user_sub = (uint16_t)((evh[8] << 8) | evh[9]);
-                msg        = evh + 10U;
-                ev_type    =  ((uint32_t)msg[4]  << 24) | ((uint32_t)msg[5]  << 16)
-                           |  ((uint32_t)msg[6]  <<  8) |  (uint32_t)msg[7];
-                ev_status  =  ((uint32_t)msg[8]  << 24) | ((uint32_t)msg[9]  << 16)
-                           |  ((uint32_t)msg[10] <<  8) |  (uint32_t)msg[11];
-                ev_datalen =  ((uint32_t)msg[20] << 24) | ((uint32_t)msg[21] << 16)
-                           |  ((uint32_t)msg[22] <<  8) |  (uint32_t)msg[23];
-                event_data = msg + 48U;
+    if (ether_type != 0x886CU || evh_user_sub != 1U) return -1;
+    if (ev_type != 69U) return -1;
 
-                if (ether_type != 0x886CU || evh_user_sub != 1U) continue;
+    if (ev_status == 0U) {
+        CYW43_PRINTF("p4.A: scan-complete event received (datalen=%lu)\n",
+                     (unsigned long)ev_datalen);
+        return 1;
+    }
+    if (ev_status != 8U) {
+        CYW43_PRINTF("p4.A: ESCAN status=%lu (not PARTIAL) — skip\n",
+                     (unsigned long)ev_status);
+        return -1;
+    }
+    if (ev_datalen < 12U + 80U) {
+        CYW43_PRINTF("p4.A: ESCAN partial event too short (datalen=%lu)\n",
+                     (unsigned long)ev_datalen);
+        return -1;
+    }
 
-                if (ev_type != 69U) continue;
-
-                if (ev_status == 0U) {
-                    scan_done = 1;
-                    CYW43_PRINTF("p4.A: scan-complete event received "
-                                 "(datalen=%lu)\n",
-                                 (unsigned long)ev_datalen);
-                    break;
-                }
-                if (ev_status != 8U) {
-                    CYW43_PRINTF("p4.A: ESCAN status=%lu (not PARTIAL) — "
-                                 "skip\n", (unsigned long)ev_status);
-                    continue;
-                }
-                if (ev_datalen < 12U + 80U) {
-                    CYW43_PRINTF("p4.A: ESCAN partial event too short "
-                                 "(datalen=%lu)\n",
-                                 (unsigned long)ev_datalen);
-                    continue;
-                }
-
-                {
-                    const uint8_t *bss     = event_data + 12U;
-                    const uint8_t *bssid   = bss + 8U;
-                    uint8_t        ssid_l  = bss[18];
-                    const uint8_t *ssid    = bss + 19U;
-                    uint16_t       chanspec = (uint16_t)(bss[72]
-                                                | (bss[73] << 8));
-                    int16_t        rssi   = (int16_t)((uint16_t)bss[78]
-                                                | ((uint16_t)bss[79] << 8));
-                    aps_seen += 1U;
-                    CYW43_PRINTF("p4.A: AP #%u  BSSID=%02x:%02x:%02x:"
-                                 "%02x:%02x:%02x  RSSI=%d  ch=%u  SSID=",
-                                 aps_seen,
-                                 bssid[0], bssid[1], bssid[2],
-                                 bssid[3], bssid[4], bssid[5],
-                                 (int)rssi, chanspec & 0xFFU);
-                    if (ssid_l > 32U) ssid_l = 32U;
-                    for (i = 0U; i < ssid_l; ++i) {
-                        char c = (char)ssid[i];
-                        if (c >= 0x20 && c < 0x7F) tiku_uart_putc(c);
-                        else                       tiku_uart_putc('.');
-                    }
-                    tiku_uart_putc('\n');
-                }
-                polls = 0U;
-            }
+    {
+        const uint8_t *bss     = event_data + 12U;
+        const uint8_t *bssid   = bss + 8U;
+        uint8_t        ssid_l  = bss[18];
+        const uint8_t *ssid    = bss + 19U;
+        uint16_t       chanspec = (uint16_t)(bss[72] | (bss[73] << 8));
+        int16_t        rssi    = (int16_t)((uint16_t)bss[78]
+                                          | ((uint16_t)bss[79] << 8));
+        uint16_t       i;
+        *aps_seen_inout += 1U;
+        CYW43_PRINTF("p4.A: AP #%u  BSSID=%02x:%02x:%02x:%02x:%02x:%02x "
+                     " RSSI=%d  ch=%u  SSID=",
+                     *aps_seen_inout,
+                     bssid[0], bssid[1], bssid[2],
+                     bssid[3], bssid[4], bssid[5],
+                     (int)rssi, chanspec & 0xFFU);
+        if (ssid_l > 32U) ssid_l = 32U;
+        for (i = 0U; i < ssid_l; ++i) {
+            char c = (char)ssid[i];
+            if (c >= 0x20 && c < 0x7F) tiku_uart_putc(c);
+            else                       tiku_uart_putc('.');
         }
-
-        if (!scan_done) {
-            CYW43_PRINTF("p4.A: scan poll budget exhausted "
-                         "(%u AP%s found, no scan-complete event)\n",
-                         aps_seen, aps_seen == 1U ? "" : "s");
-        } else {
-            CYW43_PRINTF("p4.A: *** scan done — %u AP%s discovered ***\n",
-                         aps_seen, aps_seen == 1U ? "" : "s");
-        }
-
-        return aps_seen;
+        tiku_uart_putc('\n');
+    }
+    return 0;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -804,6 +788,14 @@ TIKU_PROCESS(cyw43_runner, "wifi-cyw43");
 
 TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 {
+    /* Static locals survive across YIELD points (auto vars wouldn't —
+     * protothreads use a line-numbered case/jump state machine). */
+    static struct tiku_timer scan_timer;
+    static unsigned int      scan_polls;
+    static unsigned int      scan_aps;
+    static int               scan_done;
+    static int               scan_rc;
+
     TIKU_PROCESS_BEGIN();
 
     (void)data;
@@ -811,10 +803,9 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     CYW43_PRINTF("runner: starting WHD bring-up\n");
     if (whd_bring_up() == TIKU_DRV_OK) {
         cyw43_state.up = 1U;
-        /* Demonstrate the event path: self-post a SCAN_START so the
-         * boot-time sanity scan still happens automatically. Once a
-         * shell command + user-facing API land (phase R.5), this
-         * auto-scan can be removed. */
+        /* Self-post the first SCAN_START to demonstrate the event
+         * path. Once a shell command + user-facing API land (phase
+         * R.5), this auto-scan can be removed. */
         (void)tiku_process_post(&cyw43_runner,
                                 CYW43_WIFI_EVT_SCAN_START, NULL);
     } else {
@@ -827,7 +818,64 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
         if (ev == CYW43_WIFI_EVT_SCAN_START && cyw43_state.up) {
             CYW43_PRINTF("runner: SCAN_START — starting active scan\n");
             cyw43_state.scan_in_progress = 1U;
-            cyw43_state.scan_aps_found   = (uint16_t)whd_scan_once();
+
+            scan_rc = whd_scan_send_iovar();
+            if (scan_rc != TIKU_DRV_OK) {
+                cyw43_state.scan_in_progress = 0U;
+                continue;
+            }
+
+            scan_polls = 0U;
+            scan_aps   = 0U;
+            scan_done  = 0;
+
+            /* Phase R.3: yield 1 tick (~7.81 ms) every iteration —
+             * even when an AP just arrived — so the scheduler can
+             * run the shell / other processes between events. The
+             * chip sometimes pumps several frames in tight bursts
+             * during a busy channel; without an unconditional yield
+             * we'd process all of them back-to-back and starve
+             * other processes for hundreds of ms.
+             *
+             * Cost: ~7.81 ms per AP found adds ~80 ms to a typical
+             * 10-AP scan (~2% extra latency), in exchange for the
+             * shell staying responsive throughout. */
+            while (!scan_done && scan_polls < 700U) {
+                uint32_t pkt_len = 0UL;
+                int      pr;
+
+                (void)cyw43_gspi_f2_rx_try(whd_rx_buf,
+                                           WHD_RX_BUF_WORDS, &pkt_len);
+                if (pkt_len > 0U) {
+                    sdpcm_update_credit_from_rx(
+                        (const uint8_t *)whd_rx_buf);
+                    pr = whd_scan_process_frame(&scan_aps);
+                    if (pr > 0) {
+                        scan_done = 1;
+                        break;
+                    }
+                    if (pr == 0) {
+                        /* AP printed — reset the budget. */
+                        scan_polls = 0U;
+                    }
+                } else {
+                    scan_polls += 1U;
+                }
+
+                PT_WAIT_UNTIL_TIMEOUT(process_pt, &scan_timer,
+                                      scan_done, 1U);
+            }
+
+            if (!scan_done) {
+                CYW43_PRINTF("p4.A: scan poll budget exhausted "
+                             "(%u AP%s found, no scan-complete event)\n",
+                             scan_aps, scan_aps == 1U ? "" : "s");
+            } else {
+                CYW43_PRINTF("p4.A: *** scan done — %u AP%s discovered ***\n",
+                             scan_aps, scan_aps == 1U ? "" : "s");
+            }
+
+            cyw43_state.scan_aps_found   = (uint16_t)scan_aps;
             cyw43_state.scan_in_progress = 0U;
         }
         /* Future: CYW43_WIFI_EVT_JOIN_START, _DISCONNECT, etc. */

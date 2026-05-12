@@ -491,10 +491,12 @@ static int gspi_xfer_bits(uint32_t cmd_word,
     tx_bits = 32U + tx_data_bits;
     rx_bits = rx_words * 32U;
 
-    /* Single-word xfers preserve the chatty per-transaction log
-     * (used by the wake/probe path). Block xfers go silent because
-     * dumping every word during firmware upload would drown the UART. */
-    verbose = (tx_words <= 1U) && (rx_words <= 2U);
+    /* Per-transaction "[xfer OK]" log was useful during bring-up
+     * but is a heavy UART load (one ~80-char line per gSPI xfer at
+     * 115200 baud ≈ 7 ms blocking TX) — that monopolises CPU and
+     * starves cooperative processes like the shell. Set this to 1
+     * if you need to debug a stuck transfer. */
+    verbose = 0;
 
     /* 1. Drain any stale RX FIFO data from a previous transaction. */
     while (!(PIO1(RP2350_PIO_FSTAT) & CYW43_SM_RXEMPTY_BIT)) {
