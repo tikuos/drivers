@@ -30,10 +30,44 @@
 #include "firmware.h"
 #include "tiku.h"
 #include <arch/arm-rp2350/tiku_uart_arch.h>
+#include <kernel/cpu/tiku_watchdog.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
 #include <kernel/timers/tiku_timer.h>
 #include <string.h>
+
+/*---------------------------------------------------------------------------*/
+/* Memory-safety model                                                       */
+/*---------------------------------------------------------------------------*/
+/*
+ * The WHD layer reads bytes that come straight from the air — every
+ * scan/event/data frame is attacker-influenceable. Three protections
+ * are in place against a corrupt frame causing damage outside our
+ * own buffer:
+ *
+ *  1. Non-execute (NX). The arena lives in TikuOS's SEG2 SRAM region,
+ *     which the platform MPU configures as RW + XN. A corrupted frame
+ *     can't be executed even if it contained bytes that resemble
+ *     instructions.
+ *
+ *  2. Region registration. tiku_arena_create() claims the backing
+ *     buffer in the kernel's region registry, so any region-aware
+ *     code can ask "who owns this address?" rather than guessing.
+ *
+ *  3. Bounded carving. The arena's bump allocator returns aligned
+ *     sub-buffers of fixed sizes; the carving itself can't slop into
+ *     unrelated memory. (A buffer overrun inside our own code is
+ *     still possible — the bounds aren't hardware-enforced. But
+ *     that's a code bug, not a chip attack surface, and the W^X
+ *     invariant above stops it from escalating to RCE.)
+ *
+ * What's NOT here: a per-driver MPU region that fences the WHD arena
+ * from kernel data. The RP2350 MPU has 8 regions; 6 are already used
+ * for system-wide W^X and a stack-overflow guard. Adding a 7th region
+ * for the WHD arena is a kernel-side feature, not a driver-side one,
+ * and the value-add is small given the W^X invariant already prevents
+ * the worst outcomes.
+ */
 
 #ifndef CYW43_PRINTF
 #define CYW43_PRINTF(...) TIKU_PRINTF("[cyw43] " __VA_ARGS__)
@@ -804,6 +838,39 @@ static int whd_scan_process_frame(unsigned int *aps_seen_inout)
  */
 TIKU_PROCESS(cyw43_runner, "wifi-cyw43");
 
+/* Sample MPU violation count and log if it moved since last check.
+ * Called from the runner; non-invasive (just reads + comparing).
+ * The MPU is enforced kernel-wide, so any change in the count tells
+ * us SOMETHING in the system tripped W^X or wrote to a read-only
+ * region — not necessarily WHD code, but worth flagging. */
+static uint32_t runner_mpu_baseline;
+
+static void runner_health_tick(void)
+{
+    /* Kick the watchdog. If WHD wedges and the runner stops yielding,
+     * the watchdog bites; the system reboots cleanly instead of
+     * sitting locked-up. tiku_watchdog_kick is a no-op if the WDT
+     * isn't enabled — safe to call unconditionally. */
+    tiku_watchdog_kick();
+
+    /* MPU violation count is a monotonically increasing counter.
+     * A jump means at least one MemManage fault was caught (and the
+     * platform's MemManage handler likely already reset the chip,
+     * but the count survives in .uninit). */
+    {
+        uint32_t now = tiku_mpu_get_violation_count();
+        if (now != runner_mpu_baseline) {
+            uint16_t flags = tiku_mpu_get_violation_flags();
+            CYW43_PRINTF("runner: MPU violation count %lu -> %lu "
+                         "(flags=0x%04x)\n",
+                         (unsigned long)runner_mpu_baseline,
+                         (unsigned long)now, flags);
+            tiku_mpu_clear_violation_flags();
+            runner_mpu_baseline = now;
+        }
+    }
+}
+
 TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 {
     /* Static locals survive across YIELD points (auto vars wouldn't —
@@ -817,6 +884,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     TIKU_PROCESS_BEGIN();
 
     (void)data;
+    runner_mpu_baseline = tiku_mpu_get_violation_count();
 
     CYW43_PRINTF("runner: starting WHD bring-up\n");
     if (whd_bring_up() == TIKU_DRV_OK) {
@@ -832,6 +900,12 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 
     while (1) {
         TIKU_PROCESS_YIELD();
+
+        /* Runner-level health tick: kick the watchdog and notice
+         * any MPU violation that may have happened anywhere in the
+         * system since the last check. Cheap (two reads + a write),
+         * keeps the WiFi side observably alive. */
+        runner_health_tick();
 
         if (ev == CYW43_WIFI_EVT_SCAN_START && cyw43_state.up) {
             CYW43_PRINTF("runner: SCAN_START — starting active scan\n");
@@ -861,6 +935,12 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             while (!scan_done && scan_polls < 700U) {
                 uint32_t pkt_len = 0UL;
                 int      pr;
+
+                /* Scan can take seconds; keep kicking the watchdog
+                 * so it doesn't bite mid-scan. (The runner DOES
+                 * yield each iteration, but watchdog timing is
+                 * independent of yields.) */
+                tiku_watchdog_kick();
 
                 (void)cyw43_gspi_f2_rx_try(whd_rx_buf,
                                            WHD_RX_BUF_WORDS, &pkt_len);
