@@ -34,6 +34,7 @@
 #include <kernel/cpu/tiku_watchdog.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
+#include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_timer.h>
 #include <string.h>
 
@@ -142,6 +143,10 @@ static struct {
     uint8_t  scan_in_progress;
     uint16_t scan_aps_found;
     uint8_t  mac[6];
+    /* Wall-clock duration of the LAST completed scan, in TIKU_CLOCK
+     * ticks (TIKU_CLOCK_SECOND ticks/sec). 0 if no scan has finished
+     * yet. Captured at scan_start / scan_end inside the runner. */
+    uint32_t last_scan_ticks;
     /* Last completed scan's deduplicated AP table. The runner
      * appends here during scan; subscribers iterate after the
      * CYW43_WIFI_EVT_SCAN_COMPLETE broadcast. */
@@ -930,6 +935,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     static unsigned int      scan_aps;
     static int               scan_done;
     static int               scan_rc;
+    static tiku_clock_time_t scan_start_tick;
 
     TIKU_PROCESS_BEGIN();
 
@@ -972,6 +978,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             CYW43_PRINTF("runner: SCAN_START — starting active scan\n");
             cyw43_state.scan_in_progress = 1U;
             cyw43_state.scan_count       = 0U;  /* clear table for fresh scan */
+            scan_start_tick              = tiku_clock_time();
 
             scan_rc = whd_scan_send_iovar();
             if (scan_rc != TIKU_DRV_OK) {
@@ -1036,13 +1043,26 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             /* Scan done — restore LED to solid (WiFi-up indicator). */
             if (tiku_led_count() > 0U) tiku_led_on(0U);
 
-            if (!scan_done) {
-                CYW43_PRINTF("p4.A: scan poll budget exhausted "
-                             "(%u AP%s found, no scan-complete event)\n",
-                             scan_aps, scan_aps == 1U ? "" : "s");
-            } else {
-                CYW43_PRINTF("p4.A: *** scan done — %u AP%s discovered ***\n",
-                             scan_aps, scan_aps == 1U ? "" : "s");
+            {
+                tiku_clock_time_t elapsed =
+                    (tiku_clock_time_t)(tiku_clock_time() - scan_start_tick);
+                /* tiku_clock_time_t may be uint16 (MSP430); widen here. */
+                cyw43_state.last_scan_ticks = (uint32_t)elapsed;
+
+                if (!scan_done) {
+                    CYW43_PRINTF("p4.A: scan poll budget exhausted "
+                                 "(%u AP%s found, no scan-complete event,"
+                                 " %lu ticks)\n",
+                                 scan_aps, scan_aps == 1U ? "" : "s",
+                                 (unsigned long)elapsed);
+                } else {
+                    CYW43_PRINTF("p4.A: *** scan done — %u AP%s in "
+                                 "%lu ticks (~%lu ms) ***\n",
+                                 scan_aps, scan_aps == 1U ? "" : "s",
+                                 (unsigned long)elapsed,
+                                 (unsigned long)(((uint32_t)elapsed * 1000UL)
+                                                 / TIKU_CLOCK_SECOND));
+                }
             }
 
             cyw43_state.scan_aps_found   = (uint16_t)scan_aps;
@@ -1122,11 +1142,28 @@ int whd_runner_init(void)
     if (rc != TIKU_DRV_OK) {
         return rc;
     }
-    tiku_process_start(&cyw43_runner, NULL);
+    /* Report SRAM footprint to the kernel so `ps` and /proc/<pid>/
+     * see the WiFi driver's actual memory budget rather than 0.
+     * The big consumer is the arena backing buffer; cyw43_state and
+     * the small whd state struct round out the visible cost. The
+     * field is uint16_t so we cap at 0xFFFF — our usage (~6 KB) fits. */
+    {
+        uint32_t total = (uint32_t)sizeof whd_arena_buf
+                       + (uint32_t)sizeof cyw43_state
+                       + (uint32_t)sizeof whd;
+        cyw43_runner.sram_used = (uint16_t)(total > 0xFFFFUL
+                                            ? 0xFFFFU : total);
+    }
+    /* Register with the kernel's process registry (gives the runner a
+     * pid + makes it visible in `ps` / /proc/<pid>/). Distinct from
+     * tiku_process_start, which only schedules without registering.
+     * Re-registration is harmless; we tolerate a non-zero error code
+     * silently. */
+    (void)tiku_process_register("wifi-cyw43", &cyw43_runner);
     return TIKU_DRV_OK;
 }
 
-int cyw43_wifi_scan_start(void)
+int tiku_wireless_scan_start(void)
 {
     if (!cyw43_state.up) {
         return TIKU_DRV_ERR_INVALID;
@@ -1139,7 +1176,7 @@ int cyw43_wifi_scan_start(void)
            ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
 }
 
-int cyw43_wifi_status(cyw43_wifi_status_t *out)
+int tiku_wireless_status(cyw43_wifi_status_t *out)
 {
     int i;
     if (out == (cyw43_wifi_status_t *)0) {
@@ -1148,11 +1185,12 @@ int cyw43_wifi_status(cyw43_wifi_status_t *out)
     out->up               = cyw43_state.up;
     out->scan_in_progress = cyw43_state.scan_in_progress;
     out->scan_aps_found   = cyw43_state.scan_aps_found;
+    out->last_scan_ticks  = cyw43_state.last_scan_ticks;
     for (i = 0; i < 6; ++i) out->mac[i] = cyw43_state.mac[i];
     return TIKU_DRV_OK;
 }
 
-uint8_t cyw43_wifi_scan_results(cyw43_ap_t *out, uint8_t max_results)
+uint8_t tiku_wireless_scan_results(cyw43_ap_t *out, uint8_t max_results)
 {
     uint8_t i;
     uint8_t n;

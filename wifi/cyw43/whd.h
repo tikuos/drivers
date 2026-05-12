@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include "kernel/drivers/tiku_drv.h"
 #include "kernel/process/tiku_process.h"
+#include "interfaces/wireless/tiku_wireless.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,50 +59,23 @@ extern "C" {
 /* Runner-process events                                                     */
 /*---------------------------------------------------------------------------*/
 
-/* Events. CYW43_WIFI_EVT_SCAN_START is the only one posted INTO the
- * runner (by external callers requesting a scan). The remaining
- * events are broadcast OUT from the runner via TIKU_PROCESS_BROADCAST
- * so any subscribed process (shell, IP stack, user app) can react.
- *
- * Event data:
- *   SCAN_START      : NULL
- *   SCAN_COMPLETE   : (void*) (uintptr_t) ap_count
- *   AP_FOUND        : pointer to a (transient) cyw43_ap_t in the
- *                     runner's scan_results[] array; valid until
- *                     the next AP_FOUND event or scan-complete
- *   LINK_UP         : (void*) (uintptr_t) link reason code
- *   LINK_DOWN       : (void*) (uintptr_t) link reason code
- */
-#define CYW43_WIFI_EVT_SCAN_START     (TIKU_EVENT_USER + 0U)
-#define CYW43_WIFI_EVT_SCAN_COMPLETE  (TIKU_EVENT_USER + 1U)
-#define CYW43_WIFI_EVT_AP_FOUND       (TIKU_EVENT_USER + 2U)
-#define CYW43_WIFI_EVT_LINK_UP        (TIKU_EVENT_USER + 3U)
-#define CYW43_WIFI_EVT_LINK_DOWN      (TIKU_EVENT_USER + 4U)
+/* Event IDs and result type live in interfaces/wireless/tiku_wireless.h.
+ * The old CYW43_WIFI_EVT_* / cyw43_ap_t / cyw43_wifi_status_t names are
+ * kept as aliases below so existing callers don't need a flag-day rename. */
+#define CYW43_WIFI_EVT_SCAN_START     TIKU_WIRELESS_EVT_SCAN_START
+#define CYW43_WIFI_EVT_SCAN_COMPLETE  TIKU_WIRELESS_EVT_SCAN_COMPLETE
+#define CYW43_WIFI_EVT_AP_FOUND       TIKU_WIRELESS_EVT_AP_FOUND
+#define CYW43_WIFI_EVT_LINK_UP        TIKU_WIRELESS_EVT_LINK_UP
+#define CYW43_WIFI_EVT_LINK_DOWN      TIKU_WIRELESS_EVT_LINK_DOWN
 
 /*---------------------------------------------------------------------------*/
 /* Public status snapshot                                                    */
 /*---------------------------------------------------------------------------*/
 
-/* One discovered access point. The runner accumulates these into
- * a small bounded array during a scan; the shell + any subscriber
- * iterates them after SCAN_COMPLETE. */
-#define CYW43_MAX_SCAN_RESULTS 16U
-
-typedef struct {
-    uint8_t  bssid[6];        /* 802.11 BSSID */
-    uint8_t  ssid_len;        /* 0..32 */
-    uint8_t  ssid[32];        /* not null-terminated */
-    int16_t  rssi;            /* dBm */
-    uint8_t  channel;         /* 1..13 (2.4 GHz) */
-    uint8_t  _pad;            /* explicit pad to keep size predictable */
-} cyw43_ap_t;
-
-typedef struct {
-    uint8_t  up;              /* 1 after whd bring-up completes */
-    uint8_t  scan_in_progress;
-    uint16_t scan_aps_found;  /* count from last completed scan */
-    uint8_t  mac[6];          /* chip's OTP-burned MAC (valid once up) */
-} cyw43_wifi_status_t;
+/* Driver-side aliases for the kernel-interface types/limits. */
+#define CYW43_MAX_SCAN_RESULTS TIKU_WIRELESS_MAX_SCAN_RESULTS
+typedef tiku_wireless_ap_t      cyw43_ap_t;
+typedef tiku_wireless_status_t  cyw43_wifi_status_t;
 
 /*---------------------------------------------------------------------------*/
 /* PUBLIC API                                                                */
@@ -122,29 +96,21 @@ typedef struct {
  */
 int whd_runner_init(void);
 
-/**
- * @brief Request a scan. Non-blocking — posts an event to the
- *        runner which performs the scan synchronously on its
- *        next dispatch.
- *
- * Returns TIKU_DRV_OK on enqueue, TIKU_DRV_ERR_TIMEOUT if the
- * runner's event queue is full.
+/*
+ * Driver-side aliases. The kernel-level API in
+ * interfaces/wireless/tiku_wireless.h is the source of truth; these
+ * wrappers exist so historic callers (the shell command, etc.) keep
+ * compiling. New code should call tiku_wireless_* directly.
  */
-int cyw43_wifi_scan_start(void);
+static inline int cyw43_wifi_scan_start(void)
+{ return tiku_wireless_scan_start(); }
 
-/**
- * @brief Snapshot the WHD layer's state. Synchronous read.
- */
-int cyw43_wifi_status(cyw43_wifi_status_t *out);
+static inline int cyw43_wifi_status(cyw43_wifi_status_t *out)
+{ return tiku_wireless_status(out); }
 
-/**
- * @brief Read the last scan's accumulated results.
- *
- * Copies up to `max_results` deduplicated APs (keyed by BSSID)
- * into @p out. Returns the actual count written (0 if no scan
- * has completed yet).
- */
-uint8_t cyw43_wifi_scan_results(cyw43_ap_t *out, uint8_t max_results);
+static inline uint8_t
+cyw43_wifi_scan_results(cyw43_ap_t *out, uint8_t max)
+{ return tiku_wireless_scan_results(out, max); }
 
 /**
  * @brief Issue one CDC IOCTL and wait for its matching response.
