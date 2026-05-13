@@ -849,16 +849,40 @@ int cyw43_gspi_read32(uint8_t function, uint32_t address,
     return rc;
 }
 
+/**
+ * @brief Halfword swap a 32-bit word ([H L] -> [L H])
+ *
+ * Matches the chip's reset-default 16-bit-LE wire format used
+ * before BUS_CTRL is configured for natural 32-bit MSB-first.
+ *
+ * @param v  Input word
+ * @return v with high and low 16-bit halves swapped
+ */
 static uint32_t gspi_swap16(uint32_t v)
 {
     return (v << 16) | (v >> 16);
 }
 
+/**
+ * @brief Byte-swap each 16-bit half of a 32-bit word
+ *
+ * Useful for converting between the chip's per-halfword little-
+ * endian layout and host byte order on a per-half basis.
+ *
+ * @param v  Input word
+ * @return v with bytes 0<->1 and bytes 2<->3 swapped
+ */
 static uint32_t gspi_rev16x2(uint32_t v)
 {
     return ((v & 0x00FF00FFUL) << 8) | ((v & 0xFF00FF00UL) >> 8);
 }
 
+/**
+ * @brief Full 32-bit byte reversal (endian flip)
+ *
+ * @param v  Input word
+ * @return v with all four bytes reversed (LE <-> BE)
+ */
 static uint32_t gspi_bswap32(uint32_t v)
 {
     return ((v & 0x000000FFUL) << 24) |
@@ -867,6 +891,19 @@ static uint32_t gspi_bswap32(uint32_t v)
            ((v & 0xFF000000UL) >> 24);
 }
 
+/**
+ * @brief Issue a fully pre-encoded gSPI read command and capture the
+ *        raw response word
+ *
+ * The caller supplies the on-wire command bytes already, including
+ * any byte-order encoding the current chip state requires; this
+ * helper just runs the transaction and returns the raw response
+ * untouched.
+ *
+ * @param encoded_cmd  Command word in chip-expected wire format
+ * @param raw_value    Destination for the raw 32-bit response word
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID on NULL out
+ */
 static int gspi_read32_encoded(uint32_t encoded_cmd, uint32_t *raw_value)
 {
     if (raw_value == (uint32_t *)0) {
@@ -889,6 +926,18 @@ int cyw43_gspi_write32(uint8_t function, uint32_t address,
     return gspi_xfer(cmd, &tx, 1U, (uint32_t *)0, 0U);
 }
 
+/**
+ * @brief 32-bit read using the reset-default halfword-swapped wire format
+ *
+ * Used while the chip is still in pre-BUS_CTRL state (16-bit-LE
+ * word format on the wire). Swaps both the command and the response
+ * so the host sees natural 32-bit values.
+ *
+ * @param function   gSPI function select (F0/F1/F2)
+ * @param address    Backplane register address
+ * @param out_value  Destination for the read value (host order)
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID on NULL out
+ */
 static int gspi_read32_swapped(uint8_t function, uint32_t address,
                                uint32_t *out_value)
 {
@@ -907,6 +956,18 @@ static int gspi_read32_swapped(uint8_t function, uint32_t address,
     return rc;
 }
 
+/**
+ * @brief 32-bit write using the reset-default halfword-swapped wire format
+ *
+ * Counterpart to gspi_read32_swapped. Swaps both the command and the
+ * data payload before shipping so the chip sees its expected
+ * 16-bit-LE layout.
+ *
+ * @param function  gSPI function select (F0/F1/F2)
+ * @param address   Backplane register address
+ * @param value     Value to write (host order)
+ * @return TIKU_DRV_OK on success, or a transport error from gspi_xfer
+ */
 static int gspi_write32_swapped(uint8_t function, uint32_t address,
                                 uint32_t value)
 {
