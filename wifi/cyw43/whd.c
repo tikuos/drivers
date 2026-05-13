@@ -168,6 +168,7 @@ static struct {
     uint8_t    target_ssid_len;
     char       target_ssid[33];   /* null-terminated, max 32 chars */
     char       target_psk[64];    /* null-terminated, 8..63 chars */
+    uint8_t    target_auth;       /* 0=WPA2-PSK, 1=WPA3-SAE */
     uint8_t    joined_ssid_len;
     uint8_t    joined_ssid[32];
     uint8_t    joined_bssid[6];
@@ -176,6 +177,22 @@ static struct {
     /* Phase 4.C diagnostic counter — number of frames the main-loop
      * RX poll has logged so far. Capped at 20 to avoid log floods. */
     uint8_t    rx_any_logged;
+
+    /* Auto-reconnect state. After a disconnect, we wait until
+     * tiku_clock_time() >= reconnect_at_tick before re-posting
+     * JOIN_START. reconnect_attempts grows the backoff window each
+     * time; reset to zero on a clean join. user_disconnected is set
+     * by tiku_wireless_disconnect() to suppress auto-reconnect after
+     * an explicit teardown. */
+    uint8_t           user_disconnected;
+    uint8_t           reconnect_attempts;
+    tiku_clock_time_t reconnect_at_tick;
+
+    /* RSSI snapshot: last value polled from chip + tick of last
+     * successful query. The runner polls when joined; status reports
+     * the cached value. 0 means "not yet polled". */
+    int16_t           rssi_dbm;
+    tiku_clock_time_t rssi_last_tick;
 } cyw43_state;
 
 /*---------------------------------------------------------------------------*/
@@ -977,10 +994,17 @@ p3b_done:
  */
 
 /* WPA2-PSK auth + crypto constants (from embassy's consts.rs). */
-#define WHD_WSEC_AES         0x04U
-#define WHD_AUTH_OPEN        0x00U
-#define WHD_MFP_CAPABLE      0x01U
-#define WHD_WPA_AUTH_WPA2_PSK 0x0080UL
+#define WHD_WSEC_AES          0x04U
+#define WHD_AUTH_OPEN         0x00U
+#define WHD_AUTH_SAE          0x03U
+#define WHD_MFP_NONE          0x00U
+#define WHD_MFP_CAPABLE       0x01U
+#define WHD_MFP_REQUIRED      0x02U
+#define WHD_WPA_AUTH_WPA2_PSK     0x00000080UL
+#define WHD_WPA_AUTH_WPA3_SAE_PSK 0x00040000UL
+
+/* WLC IOCTL: GET RSSI (returns int32 dBm). */
+#define WHD_CMD_GET_RSSI     127U
 
 /* Set a u32-valued iovar by name. Builds the "<name>\0<u32 LE>"
  * payload and sends WLC_SET_VAR. */
@@ -1054,6 +1078,32 @@ static int whd_set_passphrase(const char *psk)
                      buf, 68U, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
+/* Submit the WPA3-SAE passphrase via the "sae_password" iovar.
+ * SaePassphraseInfo layout (embassy structs.rs):
+ *   u16 len
+ *   u8  passphrase[128]
+ * Total = 130 bytes. */
+static int whd_set_sae_passphrase(const char *psk)
+{
+    static const char name[] = "sae_password";
+    uint8_t  buf[sizeof name + 130U];
+    uint16_t i, n = 0U, plen = 0U;
+
+    while (psk[plen] != '\0' && plen < 127U) ++plen;
+    if (plen == 0U) return TIKU_DRV_ERR_INVALID;
+
+    while (n + 1U < sizeof name) { buf[n] = (uint8_t)name[n]; n++; }
+    buf[n++] = '\0';
+    buf[n++] = (uint8_t)( plen       & 0xFFU);
+    buf[n++] = (uint8_t)((plen >> 8) & 0xFFU);
+    for (i = 0U; i < plen; ++i)   buf[n + i] = (uint8_t)psk[i];
+    for (i = plen; i < 128U; ++i) buf[n + i] = 0U;
+    n = (uint16_t)(n + 128U);
+
+    return whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_SET_VAR, 0U,
+                     buf, n, (uint8_t *)0, 0U, (uint32_t *)0);
+}
+
 /* Submit the SSID to join. wlc_ssid_t layout:
  *   u32 ssid_len
  *   u8  ssid[32]
@@ -1072,10 +1122,26 @@ static int whd_set_ssid(const char *ssid, uint8_t ssid_len)
 }
 
 /* Run the full pre-SSID join setup. Order matches embassy's
- * control::join(). SSID is sent separately (it's the assoc trigger). */
-static int whd_join_prepare(const char *psk)
+ * control::join(). SSID is sent separately (it's the assoc trigger).
+ *
+ * @param auth 0=WPA2-PSK, 1=WPA3-SAE
+ */
+static int whd_join_prepare(const char *psk, uint8_t auth)
 {
-    int rc;
+    uint32_t wpa_auth_val;
+    uint32_t auth_mode;
+    uint32_t mfp_val;
+    int      rc;
+
+    if (auth == 1U) {
+        wpa_auth_val = WHD_WPA_AUTH_WPA3_SAE_PSK;
+        auth_mode    = WHD_AUTH_SAE;
+        mfp_val      = WHD_MFP_REQUIRED;
+    } else {
+        wpa_auth_val = WHD_WPA_AUTH_WPA2_PSK;
+        auth_mode    = WHD_AUTH_OPEN;     /* open mgmt auth; WPA2 4-way does the real auth */
+        mfp_val      = WHD_MFP_CAPABLE;
+    }
 
     rc = whd_set_iovar_u32("ampdu_ba_wsize", 8UL);
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: ampdu_ba_wsize FAIL rc=%d\n", rc); return rc; }
@@ -1096,19 +1162,24 @@ static int whd_join_prepare(const char *psk)
      * defer that to the runner — staying in PT_YIELD here would block
      * the IOCTL machinery. Empirically the chip is fine with this. */
 
-    rc = whd_set_passphrase(psk);
-    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: passphrase FAIL rc=%d\n", rc); return rc; }
+    if (auth == 1U) {
+        rc = whd_set_sae_passphrase(psk);
+        if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: sae_password FAIL rc=%d\n", rc); return rc; }
+    } else {
+        rc = whd_set_passphrase(psk);
+        if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: passphrase FAIL rc=%d\n", rc); return rc; }
+    }
 
     rc = whd_ioctl_set_u32(WHD_CMD_SET_INFRA, 1UL);
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: infra FAIL rc=%d\n", rc); return rc; }
 
-    rc = whd_ioctl_set_u32(WHD_CMD_SET_AUTH, WHD_AUTH_OPEN);
+    rc = whd_ioctl_set_u32(WHD_CMD_SET_AUTH, auth_mode);
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: auth FAIL rc=%d\n", rc); return rc; }
 
-    rc = whd_set_iovar_u32("mfp", WHD_MFP_CAPABLE);
+    rc = whd_set_iovar_u32("mfp", mfp_val);
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: mfp FAIL rc=%d\n", rc); return rc; }
 
-    rc = whd_ioctl_set_u32(WHD_CMD_SET_WPA_AUTH, WHD_WPA_AUTH_WPA2_PSK);
+    rc = whd_ioctl_set_u32(WHD_CMD_SET_WPA_AUTH, wpa_auth_val);
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: wpa_auth FAIL rc=%d\n", rc); return rc; }
 
     return TIKU_DRV_OK;
@@ -1487,7 +1558,12 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          * channel-1 events doesn't starve a channel-2 data frame
          * sitting behind it in the chip's FIFO. Each iteration handles
          * one frame; the loop exits when rx_try returns zero. Capped
-         * to 32 iterations to bound the busy-time per wake. */
+         * to 32 iterations to bound the busy-time per wake.
+         *
+         * Channel-1 (event) frames also feed whd_link_event_parse so
+         * post-join disconnects (WLC_E_LINK with link=down) are
+         * detected here — without that, link_state would stay
+         * JOINED forever even after the AP kicks us off. */
         if (cyw43_state.up && cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED) {
             uint8_t drain_n;
             for (drain_n = 0U; drain_n < 32U; ++drain_n) {
@@ -1497,19 +1573,104 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 if (pkt_len == 0UL) break;
                 {
                     const uint8_t *rxb = (const uint8_t *)whd_rx_buf;
+                    uint8_t        ch  = (uint8_t)(rxb[5] & 0x0FU);
                     sdpcm_update_credit_from_rx(rxb);
                     /* Log the first 3 frames after join (any channel)
                      * so it's obvious the data path is alive. Caps
                      * at 3 to avoid log floods on busy networks. */
                     if (cyw43_state.rx_any_logged < 3U) {
                         CYW43_PRINTF("p4.C: rx ch=%u len=%lu\n",
-                                     (unsigned)(rxb[5] & 0x0FU),
+                                     (unsigned)ch,
                                      (unsigned long)pkt_len);
                         cyw43_state.rx_any_logged += 1U;
+                    }
+                    if (ch == 1U) {
+                        uint32_t st_raw = 0UL;
+                        int lr = whd_link_event_parse(&st_raw);
+                        if (lr < 0) {
+                            /* Disconnect / link-down event. */
+                            CYW43_PRINTF("runner: *** LINK DOWN — "
+                                         "left %s (status=0x%lx) ***\n",
+                                         cyw43_state.joined_ssid_len > 0U
+                                            ? cyw43_state.target_ssid : "?",
+                                         (unsigned long)st_raw);
+                            cyw43_state.link_state      = TIKU_WIRELESS_LINK_IDLE;
+                            cyw43_state.joined_ssid_len = 0U;
+                            cyw43_state.link_status_raw = st_raw;
+                            cyw43_state.rssi_dbm        = 0;
+                            (void)tiku_process_post(
+                                TIKU_PROCESS_BROADCAST,
+                                TIKU_WIRELESS_EVT_LINK_DOWN,
+                                (tiku_event_data_t)(uintptr_t)st_raw);
+                            /* Schedule auto-reconnect (unless the
+                             * user-initiated path explicitly cleared
+                             * target_ssid). Backoff = 1s on first
+                             * attempt, doubling up to 30s. */
+                            if (cyw43_state.user_disconnected == 0U
+                                && cyw43_state.target_ssid_len > 0U) {
+                                tiku_clock_time_t now = tiku_clock_time();
+                                uint8_t  shift = cyw43_state.reconnect_attempts;
+                                uint16_t secs  = (shift >= 5U) ? 30U
+                                                              : (uint16_t)(1U << shift);
+                                cyw43_state.reconnect_at_tick = (tiku_clock_time_t)
+                                    (now + (tiku_clock_time_t)secs * TIKU_CLOCK_SECOND);
+                                if (cyw43_state.reconnect_attempts < 8U) {
+                                    cyw43_state.reconnect_attempts += 1U;
+                                }
+                                CYW43_PRINTF("runner: auto-reconnect in %u s "
+                                             "(attempt %u)\n",
+                                             (unsigned)secs,
+                                             (unsigned)cyw43_state.reconnect_attempts);
+                            }
+                            /* Bail out of drain loop — we're idle now. */
+                            break;
+                        }
                     }
                     (void)whd_rx_dispatch_data((uint16_t)pkt_len);
                 }
             }
+
+        }
+
+        /* Auto-reconnect: when link is IDLE, the user didn't ask for
+         * disconnect, a target SSID is still configured, and the
+         * backoff window has elapsed, re-post JOIN_START. Wrap-safe
+         * "now >= reconnect_at_tick" check uses (now - then) <
+         * 0x80000000 -- negative deltas wrap to large values. */
+        if (cyw43_state.up
+            && cyw43_state.link_state == TIKU_WIRELESS_LINK_IDLE
+            && cyw43_state.user_disconnected == 0U
+            && cyw43_state.target_ssid_len > 0U
+            && cyw43_state.reconnect_attempts > 0U
+            && (tiku_clock_time_t)(tiku_clock_time()
+                                   - cyw43_state.reconnect_at_tick)
+               < (tiku_clock_time_t)0x80000000UL) {
+            CYW43_PRINTF("runner: auto-reconnect (idle): re-posting JOIN_START\n");
+            cyw43_state.link_state = TIKU_WIRELESS_LINK_CONNECTING;
+            (void)tiku_process_post(&cyw43_runner,
+                                    TIKU_WIRELESS_EVT_JOIN_START, NULL);
+        }
+
+        /* RSSI poll: every 2s when joined. Single IOCTL, returns int32
+         * dBm. Cached in cyw43_state.rssi_dbm for tiku_wireless_status. */
+        if (cyw43_state.up
+            && cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED
+            && (tiku_clock_time_t)(tiku_clock_time()
+                                   - cyw43_state.rssi_last_tick)
+               >= (tiku_clock_time_t)(2U * TIKU_CLOCK_SECOND)) {
+            uint8_t  rssi_buf[4] = {0U, 0U, 0U, 0U};
+            uint32_t rlen        = 0UL;
+            int rr = whd_ioctl(WHD_IOCTL_KIND_GET, WHD_CMD_GET_RSSI, 0U,
+                               rssi_buf, sizeof rssi_buf,
+                               rssi_buf, sizeof rssi_buf, &rlen);
+            if (rr == TIKU_DRV_OK && rlen >= 4U) {
+                int32_t v = (int32_t)((uint32_t)rssi_buf[0]
+                                      | ((uint32_t)rssi_buf[1] <<  8)
+                                      | ((uint32_t)rssi_buf[2] << 16)
+                                      | ((uint32_t)rssi_buf[3] << 24));
+                cyw43_state.rssi_dbm = (int16_t)v;
+            }
+            cyw43_state.rssi_last_tick = tiku_clock_time();
         }
 
         /* Runner-level health tick: kick the watchdog and notice
@@ -1644,7 +1805,8 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             cyw43_state.link_state      = TIKU_WIRELESS_LINK_CONNECTING;
             cyw43_state.link_status_raw = 0UL;
 
-            rc_j = whd_join_prepare(cyw43_state.target_psk);
+            rc_j = whd_join_prepare(cyw43_state.target_psk,
+                                    cyw43_state.target_auth);
             if (rc_j == TIKU_DRV_OK) {
                 rc_j = whd_set_ssid(cyw43_state.target_ssid,
                                     cyw43_state.target_ssid_len);
@@ -1703,7 +1865,10 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                                 ? (uint8_t)cyw43_state.target_ssid[k] : 0U;
                     }
                 }
-                cyw43_state.link_state = TIKU_WIRELESS_LINK_JOINED;
+                cyw43_state.link_state         = TIKU_WIRELESS_LINK_JOINED;
+                cyw43_state.reconnect_attempts = 0U;
+                cyw43_state.user_disconnected  = 0U;
+                cyw43_state.rssi_last_tick     = 0U;
                 CYW43_PRINTF("runner: *** LINK UP — joined %s ***\n",
                              cyw43_state.target_ssid);
                 (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
@@ -1726,8 +1891,12 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                                  (const uint8_t *)0, 0U,
                                  (uint8_t *)0, 0U, (uint32_t *)0);
             CYW43_PRINTF("runner: DISCONNECT rc=%d\n", rc_d);
-            cyw43_state.link_state      = TIKU_WIRELESS_LINK_IDLE;
-            cyw43_state.joined_ssid_len = 0U;
+            cyw43_state.link_state         = TIKU_WIRELESS_LINK_IDLE;
+            cyw43_state.joined_ssid_len    = 0U;
+            cyw43_state.target_ssid_len    = 0U;   /* prevents auto-reconnect */
+            cyw43_state.user_disconnected  = 1U;
+            cyw43_state.reconnect_attempts = 0U;
+            cyw43_state.rssi_dbm           = 0;
             (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
                                     TIKU_WIRELESS_EVT_LINK_DOWN,
                                     (tiku_event_data_t)(uintptr_t)0);
@@ -1843,23 +2012,32 @@ int tiku_wireless_status(cyw43_wifi_status_t *out)
     out->link_state       = cyw43_state.link_state;
     out->joined_ssid_len  = cyw43_state.joined_ssid_len;
     out->link_status_raw  = cyw43_state.link_status_raw;
+    out->rssi_dbm         = cyw43_state.rssi_dbm;
     for (i = 0; i < 6; ++i) out->mac[i]          = cyw43_state.mac[i];
     for (i = 0; i < 6; ++i) out->joined_bssid[i] = cyw43_state.joined_bssid[i];
     for (i = 0; i < 32; ++i) out->joined_ssid[i] = cyw43_state.joined_ssid[i];
     return TIKU_DRV_OK;
 }
 
-int tiku_wireless_connect(const char *ssid, const char *psk)
+int tiku_wireless_connect_auth(const char *ssid, const char *psk,
+                               tiku_wireless_auth_t auth)
 {
     uint8_t i, slen = 0U, plen = 0U;
+    uint8_t min_plen;
+
     if (!ssid || !psk) return TIKU_DRV_ERR_INVALID;
     if (!cyw43_state.up) return TIKU_DRV_ERR_INVALID;
     if (cyw43_state.link_state == TIKU_WIRELESS_LINK_CONNECTING) {
         return TIKU_DRV_ERR_TIMEOUT;
     }
     while (ssid[slen] && slen < 32U) ++slen;
-    while (psk[plen]  && plen < 63U) ++plen;
-    if (slen == 0U || plen < 8U) return TIKU_DRV_ERR_INVALID;
+    /* WPA3 sae_password allows up to 127 chars; WPA2 PSK is 8..63. */
+    while (psk[plen]  && plen < 127U) ++plen;
+    min_plen = (auth == TIKU_WIRELESS_AUTH_WPA3_SAE) ? 1U : 8U;
+    if (slen == 0U || plen < min_plen) return TIKU_DRV_ERR_INVALID;
+    if (auth == TIKU_WIRELESS_AUTH_WPA2_PSK && plen > 63U) {
+        return TIKU_DRV_ERR_INVALID;
+    }
 
     /* Copy strings into runner-owned storage. Caller's buffers may
      * be on the shell command's stack — they don't survive the
@@ -1868,12 +2046,21 @@ int tiku_wireless_connect(const char *ssid, const char *psk)
     cyw43_state.target_ssid[slen] = '\0';
     cyw43_state.target_ssid_len   = slen;
     for (i = 0U; i < plen; ++i) cyw43_state.target_psk[i] = psk[i];
-    cyw43_state.target_psk[plen] = '\0';
-    cyw43_state.link_state = TIKU_WIRELESS_LINK_CONNECTING;
+    cyw43_state.target_psk[plen]  = '\0';
+    cyw43_state.target_auth       = (auth == TIKU_WIRELESS_AUTH_WPA3_SAE) ? 1U : 0U;
+    cyw43_state.link_state        = TIKU_WIRELESS_LINK_CONNECTING;
+    cyw43_state.user_disconnected = 0U;
+    cyw43_state.reconnect_attempts = 0U;
 
     return tiku_process_post(&cyw43_runner,
                              TIKU_WIRELESS_EVT_JOIN_START, NULL)
            ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
+}
+
+int tiku_wireless_connect(const char *ssid, const char *psk)
+{
+    return tiku_wireless_connect_auth(ssid, psk,
+                                      TIKU_WIRELESS_AUTH_WPA2_PSK);
 }
 
 int tiku_wireless_disconnect(void)
