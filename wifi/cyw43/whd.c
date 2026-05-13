@@ -173,6 +173,9 @@ static struct {
     uint8_t    joined_ssid[32];
     uint8_t    joined_bssid[6];
     uint32_t   link_status_raw;
+    /* Last join duration in TIKU_CLOCK_SECOND-aligned ticks; mirrors
+     * last_scan_ticks. Zero before the first attempt. */
+    uint32_t   last_join_ticks;
 
     /* Phase 4.C diagnostic counter — number of frames the main-loop
      * RX poll has logged so far. Capped at 20 to avoid log floods. */
@@ -1464,15 +1467,16 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
     /* Static locals survive across YIELD points (auto vars wouldn't —
      * protothreads use a line-numbered case/jump state machine). */
     static struct tiku_timer scan_timer;
-    static unsigned int      scan_polls;
     static unsigned int      scan_aps;
     static int               scan_done;
     static int               scan_rc;
     static tiku_clock_time_t scan_start_tick;
+    static tiku_clock_time_t scan_idle_deadline;
     static struct tiku_timer join_timer;
-    static unsigned int      join_polls;
     static int               join_done;
     static uint32_t          join_link_status;
+    static tiku_clock_time_t join_start_tick;
+    static tiku_clock_time_t join_deadline;
     static struct tiku_timer rx_drain_timer;
 
     TIKU_PROCESS_BEGIN();
@@ -1704,9 +1708,16 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 continue;
             }
 
-            scan_polls = 0U;
-            scan_aps   = 0U;
-            scan_done  = 0;
+            scan_aps           = 0U;
+            scan_done          = 0;
+            /* Idle deadline: if no scan-result frame arrives within
+             * the window, bail out. Resets on every AP printed.
+             * Old code used 700 raw polls * 1 tick = ~5.5 s; we
+             * keep the same semantics with a clock-based deadline
+             * so the timeout doesn't drift if TIKU_CLOCK_SECOND
+             * changes. */
+            scan_idle_deadline = (tiku_clock_time_t)
+                (tiku_clock_time() + 5U * TIKU_CLOCK_SECOND);
 
             /* Phase R.3: yield 1 tick (~7.81 ms) every iteration —
              * even when an AP just arrived — so the scheduler can
@@ -1719,7 +1730,8 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
              * Cost: ~7.81 ms per AP found adds ~80 ms to a typical
              * 10-AP scan (~2% extra latency), in exchange for the
              * shell staying responsive throughout. */
-            while (!scan_done && scan_polls < 700U) {
+            while (!scan_done
+                   && TIKU_CLOCK_LT(tiku_clock_time(), scan_idle_deadline)) {
                 uint32_t pkt_len = 0UL;
                 int      pr;
 
@@ -1740,11 +1752,10 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                         break;
                     }
                     if (pr == 0) {
-                        /* AP printed — reset the budget. */
-                        scan_polls = 0U;
+                        /* AP printed — push the idle deadline out. */
+                        scan_idle_deadline = (tiku_clock_time_t)
+                            (tiku_clock_time() + 5U * TIKU_CLOCK_SECOND);
                     }
-                } else {
-                    scan_polls += 1U;
                 }
 
                 PT_WAIT_UNTIL_TIMEOUT(process_pt, &scan_timer,
@@ -1817,19 +1828,22 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 continue;
             }
             CYW43_PRINTF("runner: SSID set — waiting for LINK_UP event "
-                         "(up to ~10 s)...\n");
+                         "(up to ~11 s)...\n");
 
             /* Drain F2 events until WLC_E_LINK with link=up arrives,
-             * a link-down/fail arrives, or we time out. ~700 polls *
-             * 1-tick yield (~7.81 ms) ≈ 5.5 s. WPA2 4-way usually
-             * completes inside 2 s on an open path. We double-loop
-             * once on a single timeout to give slow APs more room. */
-            join_done = 0;
+             * a link-down/fail arrives, or we cross the wall-clock
+             * deadline. WPA2 4-way usually completes inside 2 s; we
+             * give APs up to ~11 s before giving up. The deadline
+             * is now clock-time-based so it doesn't drift if
+             * TIKU_CLOCK_SECOND changes. */
+            join_done        = 0;
             join_link_status = 0UL;
-            for (join_polls = 0U;
-                 join_polls < 1400U && !join_done;
-                 ++join_polls)
-            {
+            join_start_tick  = tiku_clock_time();
+            join_deadline    = (tiku_clock_time_t)
+                (join_start_tick + 11U * TIKU_CLOCK_SECOND);
+
+            while (!join_done
+                   && TIKU_CLOCK_LT(tiku_clock_time(), join_deadline)) {
                 uint32_t pkt_len = 0UL;
                 int      lr;
 
@@ -1853,6 +1867,8 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             }
 
             cyw43_state.link_status_raw = join_link_status;
+            cyw43_state.last_join_ticks =
+                (uint32_t)(tiku_clock_time_t)(tiku_clock_time() - join_start_tick);
             if (join_done > 0) {
                 /* Capture the SSID we joined (echo target — chip
                  * doesn't have a clean readback IOCTL we use here). */
@@ -1877,8 +1893,9 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             } else {
                 cyw43_state.link_state = TIKU_WIRELESS_LINK_FAILED;
                 CYW43_PRINTF("runner: join FAILED (link_status=0x%lx, "
-                             "polls=%u)\n",
-                             (unsigned long)join_link_status, join_polls);
+                             "%lu ticks)\n",
+                             (unsigned long)join_link_status,
+                             (unsigned long)cyw43_state.last_join_ticks);
                 (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
                                         TIKU_WIRELESS_EVT_LINK_DOWN,
                                         (tiku_event_data_t)(uintptr_t)
@@ -2013,6 +2030,7 @@ int tiku_wireless_status(cyw43_wifi_status_t *out)
     out->joined_ssid_len  = cyw43_state.joined_ssid_len;
     out->link_status_raw  = cyw43_state.link_status_raw;
     out->rssi_dbm         = cyw43_state.rssi_dbm;
+    out->last_join_ticks  = cyw43_state.last_join_ticks;
     for (i = 0; i < 6; ++i) out->mac[i]          = cyw43_state.mac[i];
     for (i = 0; i < 6; ++i) out->joined_bssid[i] = cyw43_state.joined_bssid[i];
     for (i = 0; i < 32; ++i) out->joined_ssid[i] = cyw43_state.joined_ssid[i];
