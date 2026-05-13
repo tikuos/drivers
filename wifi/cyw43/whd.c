@@ -1532,11 +1532,12 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             CYW43_PRINTF("runner: GPIO IRQ on GP24 enabled (rising, "
                          "pin function untouched)\n");
         }
-        /* Self-post the first SCAN_START to demonstrate the event
-         * path. Once a shell command + user-facing API land (phase
-         * R.5), this auto-scan can be removed. */
-        (void)tiku_process_post(&cyw43_runner,
-                                CYW43_WIFI_EVT_SCAN_START, NULL);
+        /* Phase R.5 added user-facing scan/connect entry points
+         * (interfaces/wireless/, shell `wifi scan`, TikuBench wifi
+         * suite); the auto-scan that used to fire here was a
+         * dev-time event-path proof and is removed. Callers that
+         * want a scan at boot can post SCAN_START themselves from
+         * a startup process. */
     } else {
         CYW43_PRINTF("runner: WHD bring-up failed — runner idle\n");
     }
