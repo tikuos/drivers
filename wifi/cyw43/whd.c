@@ -132,6 +132,95 @@ static uint8_t      *whd_tx_scratch;
 static uint8_t      *whd_clm_iov_buf;
 
 /*---------------------------------------------------------------------------*/
+/* Persistent WiFi credentials (FRAM-backed)                                 */
+/*---------------------------------------------------------------------------*/
+/*
+ * Cache the last successful (SSID, PSK, auth) tuple in .persistent
+ * SRAM so the runner can auto-rejoin on cold boot without shell
+ * input. The arch backs the section to NVM (flash erase granule on
+ * RP2350, FRAM on MSP430), so the value survives power loss.
+ *
+ * Layout intentionally fixed-size + simple — no key-value indirection.
+ * Magic + checksum together protect against an uninitialised section
+ * being misread as a valid record on first boot.
+ */
+#define WIFI_CRED_MAGIC  0x57494649UL   /* "WIFI" */
+
+typedef struct {
+    uint32_t magic;          /* WIFI_CRED_MAGIC when populated */
+    uint8_t  ssid_len;       /* 0 = empty / forgotten          */
+    uint8_t  auth_flavor;    /* 0 = WPA2-PSK, 1 = WPA3-SAE     */
+    uint8_t  _pad[2];
+    char     ssid[33];       /* null-terminated, 32 + NUL      */
+    char     psk[64];        /* null-terminated, 63 + NUL      */
+    uint32_t xor_check;      /* xor of all bytes above (sanity) */
+} wifi_cred_persist_t;
+
+static wifi_cred_persist_t __attribute__((section(".persistent")))
+    wifi_cred_nvm;
+
+/* Compute simple XOR checksum over everything except xor_check
+ * itself. Catches bitrot + half-written records — not crypto. */
+static uint32_t wifi_cred_xor(const wifi_cred_persist_t *c)
+{
+    const uint8_t *p = (const uint8_t *)c;
+    uint32_t x = 0UL;
+    size_t   i;
+    size_t   n = (size_t)((const uint8_t *)&c->xor_check - p);
+    for (i = 0U; i < n; ++i) x ^= ((uint32_t)p[i] << ((i & 3U) * 8U));
+    return x;
+}
+
+static int wifi_cred_load(uint8_t out_ssid_len,
+                          char    out_ssid[33],
+                          char    out_psk[64],
+                          uint8_t *out_auth)
+{
+    (void)out_ssid_len;
+    if (wifi_cred_nvm.magic != WIFI_CRED_MAGIC) return 0;
+    if (wifi_cred_nvm.ssid_len == 0U
+        || wifi_cred_nvm.ssid_len > 32U) return 0;
+    if (wifi_cred_xor(&wifi_cred_nvm) != wifi_cred_nvm.xor_check) return 0;
+    {
+        uint8_t i;
+        for (i = 0U; i < 33U; ++i) out_ssid[i] = wifi_cred_nvm.ssid[i];
+        for (i = 0U; i < 64U; ++i) out_psk[i]  = wifi_cred_nvm.psk[i];
+        *out_auth = wifi_cred_nvm.auth_flavor;
+    }
+    return wifi_cred_nvm.ssid_len;
+}
+
+static void wifi_cred_save(uint8_t ssid_len,
+                           const char *ssid,
+                           const char *psk,
+                           uint8_t auth)
+{
+    uint16_t mpu_saved;
+    uint8_t  i;
+    if (ssid_len == 0U || ssid_len > 32U) return;
+
+    mpu_saved = tiku_mpu_unlock_nvm();
+    wifi_cred_nvm.magic       = WIFI_CRED_MAGIC;
+    wifi_cred_nvm.ssid_len    = ssid_len;
+    wifi_cred_nvm.auth_flavor = auth;
+    wifi_cred_nvm._pad[0]     = 0U;
+    wifi_cred_nvm._pad[1]     = 0U;
+    for (i = 0U; i < 33U; ++i) wifi_cred_nvm.ssid[i] = ssid[i];
+    for (i = 0U; i < 64U; ++i) wifi_cred_nvm.psk[i]  = psk[i];
+    wifi_cred_nvm.xor_check   = wifi_cred_xor(&wifi_cred_nvm);
+    tiku_mpu_lock_nvm(mpu_saved);
+}
+
+static void wifi_cred_forget(void)
+{
+    uint16_t mpu_saved = tiku_mpu_unlock_nvm();
+    wifi_cred_nvm.magic    = 0UL;
+    wifi_cred_nvm.ssid_len = 0U;
+    /* leave bytes — magic mismatch is enough */
+    tiku_mpu_lock_nvm(mpu_saved);
+}
+
+/*---------------------------------------------------------------------------*/
 /* RUNNER STATE                                                              */
 /*---------------------------------------------------------------------------*/
 /* Cached snapshot of the chip's bring-up state. Read by anyone via
@@ -164,6 +253,11 @@ static struct {
      * live here so the runner can pick them up after the shell
      * command returns (strings copied at API-call time, not
      * borrowed from caller). */
+    /* Set non-zero once persistent creds have been (re)loaded and a
+     * boot-time auto-rejoin has been attempted. Stops repeated
+     * rejoin attempts every iteration of the runner main loop. */
+    uint8_t    boot_rejoin_done;
+
     uint8_t    link_state;        /* tiku_wireless_link_t */
     uint8_t    target_ssid_len;
     char       target_ssid[33];   /* null-terminated, max 32 chars */
@@ -1538,6 +1632,30 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          * dev-time event-path proof and is removed. Callers that
          * want a scan at boot can post SCAN_START themselves from
          * a startup process. */
+
+        /* Cold-boot auto-rejoin: if we have valid creds in
+         * .persistent, kick off a JOIN_START to ourselves so the
+         * radio comes back to the last network without shell
+         * input. boot_rejoin_done guards against repeated attempts
+         * if the persistent record is corrupted or the AP is gone. */
+        if (cyw43_state.boot_rejoin_done == 0U) {
+            char    rec_ssid[33];
+            char    rec_psk[64];
+            uint8_t rec_auth = 0U;
+            int     rec_len  = wifi_cred_load(0U, rec_ssid, rec_psk, &rec_auth);
+            cyw43_state.boot_rejoin_done = 1U;
+            if (rec_len > 0) {
+                CYW43_PRINTF("runner: cold-boot rejoin -> "
+                             "ssid=\"%s\" auth=%s\n", rec_ssid,
+                             rec_auth == 1U ? "WPA3-SAE" : "WPA2-PSK");
+                (void)tiku_wireless_connect_auth(rec_ssid, rec_psk,
+                    rec_auth == 1U ? TIKU_WIRELESS_AUTH_WPA3_SAE
+                                   : TIKU_WIRELESS_AUTH_WPA2_PSK);
+            } else {
+                CYW43_PRINTF("runner: no stored credentials; "
+                             "use `wifi connect <ssid> <psk>`\n");
+            }
+        }
     } else {
         CYW43_PRINTF("runner: WHD bring-up failed — runner idle\n");
     }
@@ -1886,6 +2004,11 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 cyw43_state.reconnect_attempts = 0U;
                 cyw43_state.user_disconnected  = 0U;
                 cyw43_state.rssi_last_tick     = 0U;
+                /* Cache the working creds for cold-boot rejoin. */
+                wifi_cred_save(cyw43_state.target_ssid_len,
+                               cyw43_state.target_ssid,
+                               cyw43_state.target_psk,
+                               cyw43_state.target_auth);
                 CYW43_PRINTF("runner: *** LINK UP — joined %s ***\n",
                              cyw43_state.target_ssid);
                 (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
@@ -2088,6 +2211,22 @@ int tiku_wireless_disconnect(void)
     return tiku_process_post(&cyw43_runner,
                              TIKU_WIRELESS_EVT_DISCONNECT, NULL)
            ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
+}
+
+int tiku_wireless_forget(void)
+{
+    /* Wipe the FRAM-backed record first; if we crash before posting
+     * the disconnect event, the NEXT boot will at least not auto-
+     * rejoin the network we wanted to forget. */
+    wifi_cred_forget();
+
+    /* Best-effort live teardown. If radio isn't up we're already
+     * done — the user wanted creds gone, they are. */
+    if (cyw43_state.up) {
+        (void)tiku_process_post(&cyw43_runner,
+                                TIKU_WIRELESS_EVT_DISCONNECT, NULL);
+    }
+    return TIKU_DRV_OK;
 }
 
 uint8_t tiku_wireless_scan_results(cyw43_ap_t *out, uint8_t max_results)
