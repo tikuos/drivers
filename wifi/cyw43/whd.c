@@ -159,8 +159,15 @@ typedef struct {
 static wifi_cred_persist_t __attribute__((section(".persistent")))
     wifi_cred_nvm;
 
-/* Compute simple XOR checksum over everything except xor_check
- * itself. Catches bitrot + half-written records — not crypto. */
+/**
+ * @brief Compute XOR checksum for a credential record
+ *
+ * Compute simple XOR checksum over everything except xor_check
+ * itself. Catches bitrot + half-written records — not crypto.
+ *
+ * @param c  Credential record to checksum
+ * @return XOR checksum across bytes preceding the xor_check field
+ */
 static uint32_t wifi_cred_xor(const wifi_cred_persist_t *c)
 {
     const uint8_t *p = (const uint8_t *)c;
@@ -171,6 +178,18 @@ static uint32_t wifi_cred_xor(const wifi_cred_persist_t *c)
     return x;
 }
 
+/**
+ * @brief Load stored credentials from the .persistent record
+ *
+ * Returns 0 unless the magic and xor checksum both validate, so a
+ * fresh or corrupted FRAM record is rejected cleanly.
+ *
+ * @param out_ssid_len  Unused; kept for ABI symmetry
+ * @param out_ssid      Destination SSID buffer (33 bytes, NUL-padded)
+ * @param out_psk       Destination passphrase buffer (64 bytes)
+ * @param out_auth      Receives the stored auth flavor (0=WPA2, 1=WPA3)
+ * @return Stored ssid_len on success, 0 if no valid record exists
+ */
 static int wifi_cred_load(uint8_t out_ssid_len,
                           char    out_ssid[33],
                           char    out_psk[64],
@@ -190,6 +209,18 @@ static int wifi_cred_load(uint8_t out_ssid_len,
     return wifi_cred_nvm.ssid_len;
 }
 
+/**
+ * @brief Write current credentials to the .persistent record
+ *
+ * Unlocks the NVM region via MPU, writes the record, recomputes the
+ * xor_check field, then re-locks NVM. No-op if ssid_len is out of
+ * range so callers can pass through unsanitised input safely.
+ *
+ * @param ssid_len  Length of the SSID in bytes (1..32)
+ * @param ssid      Null-terminated SSID string
+ * @param psk       Null-terminated passphrase
+ * @param auth      Auth flavor to record (0=WPA2-PSK, 1=WPA3-SAE)
+ */
 static void wifi_cred_save(uint8_t ssid_len,
                            const char *ssid,
                            const char *psk,
@@ -211,6 +242,13 @@ static void wifi_cred_save(uint8_t ssid_len,
     tiku_mpu_lock_nvm(mpu_saved);
 }
 
+/**
+ * @brief Invalidate the stored credential record
+ *
+ * Zero the magic so the next wifi_cred_load() returns 0. The rest of
+ * the bytes are left in place — magic mismatch alone is enough to
+ * make the record unusable.
+ */
 static void wifi_cred_forget(void)
 {
     uint16_t mpu_saved = tiku_mpu_unlock_nvm();
@@ -295,8 +333,15 @@ static struct {
 /*---------------------------------------------------------------------------*/
 /* SDPCM credit update                                                       */
 /*---------------------------------------------------------------------------*/
-/* Update sdpcm_seq_max from the credit field of a just-received
- * SDPCM frame. Mirrors embassy's update_credit(). */
+/**
+ * @brief Update SDPCM TX credit from a just-received frame
+ *
+ * Update sdpcm_seq_max from the credit field of a just-received
+ * SDPCM frame. Mirrors embassy's update_credit().
+ *
+ * @param rx_bytes  Pointer to the first byte of the received SDPCM
+ *                  frame (channel/flags at offset 5, credit at 9)
+ */
 static void sdpcm_update_credit_from_rx(const uint8_t *rx_bytes)
 {
     uint8_t  ch_flags = rx_bytes[5];
@@ -317,9 +362,20 @@ static void sdpcm_update_credit_from_rx(const uint8_t *rx_bytes)
 /*---------------------------------------------------------------------------*/
 /* SDPCM + CDC frame builder                                                 */
 /*---------------------------------------------------------------------------*/
-/* Build a CHANNEL_TYPE_CONTROL SDPCM+CDC frame for an IOCTL.
- * Returns the total wire byte count (already 4-byte aligned).
+/**
+ * @brief Build a CHANNEL_TYPE_CONTROL SDPCM+CDC frame for an IOCTL
+ *
+ * Build a CHANNEL_TYPE_CONTROL SDPCM+CDC frame for an IOCTL.
  * tx_buf must be at least 12 + 16 + payload_len + 3 bytes.
+ *
+ * @param tx_buf       Destination buffer (caller-owned, see size above)
+ * @param cmd_code     WLC IOCTL command code
+ * @param kind_flags   CDC kind flags (SET/GET)
+ * @param iface        Interface index (encoded into CDC flags upper nibble)
+ * @param payload      IOCTL payload bytes (may be NULL if payload_len is 0)
+ * @param payload_len  Number of payload bytes
+ * @param this_id      Per-request CDC id used to match the response
+ * @return Total wire byte count, already rounded up to a 4-byte boundary
  */
 static uint32_t whd_build_ioctl(uint8_t *tx_buf,
                                 uint32_t cmd_code, uint16_t kind_flags,
@@ -417,9 +473,17 @@ int whd_register_rx_callback(whd_rx_eth_cb_t cb, void *ctx)
     return TIKU_DRV_OK;
 }
 
-/* Build a CHANNEL_TYPE_DATA SDPCM frame in tx_buf. tx_buf must be at
- * least 18 + eth_len + 3 bytes. Returns the total wire byte count
- * (4-byte aligned). */
+/**
+ * @brief Build a CHANNEL_TYPE_DATA SDPCM frame in tx_buf
+ *
+ * Build a CHANNEL_TYPE_DATA SDPCM frame in tx_buf. tx_buf must be at
+ * least 18 + eth_len + 3 bytes.
+ *
+ * @param tx_buf   Destination buffer (caller-owned)
+ * @param eth      Ethernet frame payload
+ * @param eth_len  Ethernet payload length in bytes
+ * @return Total wire byte count, rounded up to a 4-byte boundary
+ */
 static uint32_t whd_build_data_frame(uint8_t *tx_buf,
                                      const uint8_t *eth,
                                      uint16_t eth_len)
@@ -466,8 +530,15 @@ static uint32_t whd_build_data_frame(uint8_t *tx_buf,
     return padded;
 }
 
-/* Check we have SDPCM credit for the next outbound frame. Mirrors
- * embassy's has_credit(). */
+/**
+ * @brief Check we have SDPCM credit for the next outbound frame
+ *
+ * Check we have SDPCM credit for the next outbound frame. Mirrors
+ * embassy's has_credit().
+ *
+ * @return Non-zero if sdpcm_seq is still inside the chip's granted
+ *         window, zero otherwise
+ */
 static int whd_has_tx_credit(void)
 {
     return (whd.sdpcm_seq != whd.sdpcm_seq_max)
@@ -505,11 +576,18 @@ int whd_tx_eth(const uint8_t *frame, uint16_t len)
     return rc;
 }
 
-/* Inspect the frame currently in whd_rx_buf. If it's channel-2 (DATA),
- * deliver its Ethernet body to the registered callback. Returns the
- * channel number (0/1/2) or -1 on malformed. */
 static unsigned int whd_rx_eth_debug_logged = 0U;
 
+/**
+ * @brief Dispatch a channel-2 DATA frame to the RX callback
+ *
+ * Inspect the frame currently in whd_rx_buf. If it's channel-2 (DATA),
+ * deliver its Ethernet body to the registered callback.
+ *
+ * @param pkt_len  Total received SDPCM frame length in bytes
+ * @return The channel number (0/1/2) on success, or -1 on a malformed
+ *         frame
+ */
 static int whd_rx_dispatch_data(uint16_t pkt_len)
 {
     const uint8_t *rx = (const uint8_t *)whd_rx_buf;
@@ -667,7 +745,9 @@ int whd_ioctl(uint16_t kind_flags, uint32_t cmd_code, uint16_t iface,
 /*---------------------------------------------------------------------------*/
 /* whd_bring_up — phases 3.A through 3.E + event_msgs + WLC_UP               */
 /*---------------------------------------------------------------------------*/
-/*
+/**
+ * @brief Run the WHD bring-up sequence (phases 3.A..3.E + WLC_UP)
+ *
  * Pre-condition: chip's firmware is running (cyw43_gspi_probe_chip_id
  * returned OK and HT clock came up). This function brings the WHD
  * layer up to "radio is enabled, events are routed, scan/join are
@@ -678,6 +758,9 @@ int whd_ioctl(uint16_t kind_flags, uint32_t cmd_code, uint16_t iface,
  * Phase R.3 will swap the internal busy-waits for tiku_timer-based
  * yields so the protothread doesn't monopolise the CPU during the
  * one-time bring-up.
+ *
+ * @return TIKU_DRV_OK on success, or the first failing step's error
+ *         code
  */
 static int whd_bring_up(void)
 {
@@ -1103,8 +1186,16 @@ p3b_done:
 /* WLC IOCTL: GET RSSI (returns int32 dBm). */
 #define WHD_CMD_GET_RSSI     127U
 
-/* Set a u32-valued iovar by name. Builds the "<name>\0<u32 LE>"
- * payload and sends WLC_SET_VAR. */
+/**
+ * @brief Set a u32-valued iovar by name
+ *
+ * Set a u32-valued iovar by name. Builds the "<name>\0<u32 LE>"
+ * payload and sends WLC_SET_VAR.
+ *
+ * @param name   Null-terminated iovar name (max 24 chars)
+ * @param value  Little-endian u32 value to write
+ * @return TIKU_DRV_OK on success, or the underlying IOCTL error
+ */
 static int whd_set_iovar_u32(const char *name, uint32_t value)
 {
     uint8_t  buf[40];
@@ -1119,9 +1210,18 @@ static int whd_set_iovar_u32(const char *name, uint32_t value)
                      buf, n, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
-/* Set a (u32,u32)-valued iovar — needed for bsscfg:* family which
+/**
+ * @brief Set a (u32,u32)-valued iovar by name
+ *
+ * Set a (u32,u32)-valued iovar — needed for bsscfg:* family which
  * takes a config index in addition to the value. Builds
- * "<name>\0<idx LE><val LE>" as the SET_VAR payload. */
+ * "<name>\0<idx LE><val LE>" as the SET_VAR payload.
+ *
+ * @param name   Null-terminated iovar name (max 24 chars)
+ * @param idx    Little-endian u32 config index (first field)
+ * @param value  Little-endian u32 value (second field)
+ * @return TIKU_DRV_OK on success, or the underlying IOCTL error
+ */
 static int whd_set_iovar_u32x2(const char *name, uint32_t idx, uint32_t value)
 {
     uint8_t  buf[44];
@@ -1140,9 +1240,17 @@ static int whd_set_iovar_u32x2(const char *name, uint32_t idx, uint32_t value)
                      buf, n, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
-/* Set a u32-valued raw WLC IOCTL (e.g. WLC_SET_INFRA, WLC_SET_AUTH,
+/**
+ * @brief Set a u32-valued raw WLC IOCTL
+ *
+ * Set a u32-valued raw WLC IOCTL (e.g. WLC_SET_INFRA, WLC_SET_AUTH,
  * WLC_SET_WSEC, WLC_SET_WPA_AUTH). Payload is the bare 4-byte LE u32 —
- * no iovar name prefix. */
+ * no iovar name prefix.
+ *
+ * @param cmd    WLC IOCTL command code
+ * @param value  Little-endian u32 value to send
+ * @return TIKU_DRV_OK on success, or the underlying IOCTL error
+ */
 static int whd_ioctl_set_u32(uint32_t cmd, uint32_t value)
 {
     uint8_t buf[4];
@@ -1154,11 +1262,19 @@ static int whd_ioctl_set_u32(uint32_t cmd, uint32_t value)
                      buf, 4U, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
-/* Submit the WPA2 passphrase to the chip. wsec_pmk_t layout:
+/**
+ * @brief Submit the WPA2 passphrase to the chip
+ *
+ * Submit the WPA2 passphrase to the chip. wsec_pmk_t layout:
  *   u16 key_len      passphrase byte count (8..63 for WPA2-PSK)
  *   u16 flags        1 = passphrase (chip will run PBKDF2 internally)
  *   u8  key[64]
- * Total = 68 bytes, sent as the payload of WLC_SET_WSEC_PMK (cmd=268). */
+ * Total = 68 bytes, sent as the payload of WLC_SET_WSEC_PMK (cmd=268).
+ *
+ * @param psk  Null-terminated WPA2 passphrase (8..63 chars)
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID if shorter than
+ *         8 bytes, or the underlying IOCTL error
+ */
 static int whd_set_passphrase(const char *psk)
 {
     uint8_t  buf[68];
@@ -1175,11 +1291,19 @@ static int whd_set_passphrase(const char *psk)
                      buf, 68U, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
-/* Submit the WPA3-SAE passphrase via the "sae_password" iovar.
+/**
+ * @brief Submit the WPA3-SAE passphrase via the "sae_password" iovar
+ *
+ * Submit the WPA3-SAE passphrase via the "sae_password" iovar.
  * SaePassphraseInfo layout (embassy structs.rs):
  *   u16 len
  *   u8  passphrase[128]
- * Total = 130 bytes. */
+ * Total = 130 bytes.
+ *
+ * @param psk  Null-terminated WPA3-SAE passphrase (1..127 chars)
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID if empty, or
+ *         the underlying IOCTL error
+ */
 static int whd_set_sae_passphrase(const char *psk)
 {
     static const char name[] = "sae_password";
@@ -1201,11 +1325,20 @@ static int whd_set_sae_passphrase(const char *psk)
                      buf, n, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
-/* Submit the SSID to join. wlc_ssid_t layout:
+/**
+ * @brief Submit the SSID to join
+ *
+ * Submit the SSID to join. wlc_ssid_t layout:
  *   u32 ssid_len
  *   u8  ssid[32]
  * Sent as the payload of WLC_SET_SSID (cmd=26). This call is what
- * actually kicks the chip's association FSM into motion. */
+ * actually kicks the chip's association FSM into motion.
+ *
+ * @param ssid      SSID byte string (need not be NUL-terminated)
+ * @param ssid_len  SSID length in bytes (1..32)
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID for an
+ *         out-of-range length, or the underlying IOCTL error
+ */
 static int whd_set_ssid(const char *ssid, uint8_t ssid_len)
 {
     uint8_t  buf[36];
@@ -1218,10 +1351,15 @@ static int whd_set_ssid(const char *ssid, uint8_t ssid_len)
                      buf, 36U, (uint8_t *)0, 0U, (uint32_t *)0);
 }
 
-/* Run the full pre-SSID join setup. Order matches embassy's
+/**
+ * @brief Run the full pre-SSID join setup
+ *
+ * Run the full pre-SSID join setup. Order matches embassy's
  * control::join(). SSID is sent separately (it's the assoc trigger).
  *
- * @param auth 0=WPA2-PSK, 1=WPA3-SAE
+ * @param psk   Null-terminated passphrase (WPA2 or WPA3-SAE)
+ * @param auth  Auth flavor (0=WPA2-PSK, 1=WPA3-SAE)
+ * @return TIKU_DRV_OK on success, or the first failing IOCTL's error
  */
 static int whd_join_prepare(const char *psk, uint8_t auth)
 {
@@ -1282,9 +1420,16 @@ static int whd_join_prepare(const char *psk, uint8_t auth)
     return TIKU_DRV_OK;
 }
 
-/* Parse the F2 frame currently in whd_rx_buf as a WLC_E_LINK event.
- * Returns +1 on link-up (success), -1 on link-down/failed, 0 if the
- * frame is something else (not a LINK event we care about). */
+/**
+ * @brief Parse a channel-1 event frame as WLC_E_LINK
+ *
+ * Parse the F2 frame currently in whd_rx_buf as a WLC_E_LINK event.
+ *
+ * @param out_status  If non-NULL, receives the chip's event status on
+ *                    a matching LINK event
+ * @return +1 on link-up (success), -1 on link-down/failed, 0 if the
+ *         frame is something else (not a LINK event we care about)
+ */
 static int whd_link_event_parse(uint32_t *out_status)
 {
     const uint8_t *rx_buf = (const uint8_t *)whd_rx_buf;
@@ -1341,9 +1486,15 @@ static int whd_link_event_parse(uint32_t *out_status)
  * helpers are the synchronous building blocks the runner uses.
  */
 
-/* Build + send the "escan" SetVar IOCTL. Returns TIKU_DRV_OK on
- * the chip's ack; chip then drips ESCAN_RESULT events on channel 1
- * until the scan completes (status=0). */
+/**
+ * @brief Build and send the "escan" SetVar IOCTL to trigger a scan
+ *
+ * Build + send the "escan" SetVar IOCTL. On the chip's ack the scan
+ * is in progress; the chip then drips ESCAN_RESULT events on channel
+ * 1 until the scan completes (status=0).
+ *
+ * @return TIKU_DRV_OK on the chip's ack, or the underlying IOCTL error
+ */
 static int whd_scan_send_iovar(void)
 {
     static const char escan_name[] = "escan";
@@ -1383,11 +1534,19 @@ static int whd_scan_send_iovar(void)
     return rc;
 }
 
-/* Parse the frame currently sitting in whd_rx_buf. Return value:
- *   +1  scan-complete event (status=0): runner can stop polling
- *    0  AP discovered (printed inline); caller may want to reset
- *       its poll-budget after this
- *   -1  unrelated/incomplete frame; caller should keep draining
+/**
+ * @brief Parse the frame currently in whd_rx_buf as an ESCAN result
+ *
+ * Parse the frame currently sitting in whd_rx_buf. *aps_seen_inout is
+ * incremented for each partial ESCAN_RESULT seen, even for duplicates,
+ * so callers can track wire activity separately from deduplicated AP
+ * count.
+ *
+ * @param aps_seen_inout  Counter incremented for each parsed partial
+ *                        ESCAN_RESULT (caller-owned)
+ * @return +1 on scan-complete event (status=0, runner can stop polling),
+ *          0 on AP discovered (caller may reset its poll-budget),
+ *         -1 on an unrelated or incomplete frame (keep draining)
  */
 static int whd_scan_process_frame(unsigned int *aps_seen_inout)
 {
@@ -1523,13 +1682,17 @@ static int whd_scan_process_frame(unsigned int *aps_seen_inout)
  */
 TIKU_PROCESS(cyw43_runner, "wifi-cyw43");
 
-/* Sample MPU violation count and log if it moved since last check.
+static uint32_t runner_mpu_baseline;
+
+/**
+ * @brief Per-iteration runner watchdog kick + MPU violation observer
+ *
+ * Sample MPU violation count and log if it moved since last check.
  * Called from the runner; non-invasive (just reads + comparing).
  * The MPU is enforced kernel-wide, so any change in the count tells
  * us SOMETHING in the system tripped W^X or wrote to a read-only
- * region — not necessarily WHD code, but worth flagging. */
-static uint32_t runner_mpu_baseline;
-
+ * region — not necessarily WHD code, but worth flagging.
+ */
 static void runner_health_tick(void)
 {
     /* Kick the watchdog. If WHD wedges and the runner stops yielding,
@@ -2051,8 +2214,16 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 /* Public API                                                                */
 /*---------------------------------------------------------------------------*/
 
-/* Initialise the arena and carve out the three persistent buffers.
- * Idempotent (re-init re-uses the same arena_buf). */
+/**
+ * @brief Initialise the WHD memory arena and persistent buffers
+ *
+ * Initialise the arena and carve out the three persistent buffers.
+ * Idempotent (re-init re-uses the same arena_buf).
+ *
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_NOT_PRESENT if arena
+ *         creation fails, or TIKU_DRV_ERR_INVALID if any allocation
+ *         comes back NULL
+ */
 static int whd_mem_init(void)
 {
     tiku_mem_err_t err;

@@ -137,11 +137,26 @@ static const uint16_t cyw43_gspi_program[] = {
 
 #define PIO1(off) (*(volatile uint32_t *)(CYW43_PIO_BASE + (off)))
 
-/* PIO instruction encoding helpers — same idiom as the bitbang
- * driver. SET takes a 5-bit immediate (0-31). */
+/**
+ * @brief Encode a PIO `set x, v` instruction
+ *
+ * Same idiom as the bitbang driver. SET takes a 5-bit immediate (0-31).
+ *
+ * @param v   Immediate value (0-31; masked to 5 bits)
+ * @return Encoded 16-bit PIO instruction
+ */
 static inline uint16_t pio_instr_set_x(uint8_t v) {
     return (uint16_t)(0xE020U | (uint16_t)(v & 0x1FU));
 }
+
+/**
+ * @brief Encode a PIO `set y, v` instruction
+ *
+ * Same idiom as the bitbang driver. SET takes a 5-bit immediate (0-31).
+ *
+ * @param v   Immediate value (0-31; masked to 5 bits)
+ * @return Encoded 16-bit PIO instruction
+ */
 static inline uint16_t pio_instr_set_y(uint8_t v) {
     return (uint16_t)(0xE040U | (uint16_t)(v & 0x1FU));
 }
@@ -150,6 +165,18 @@ static inline uint16_t pio_instr_set_y(uint8_t v) {
 /* WL_REG_ON (power gate)                                                    */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Drive WL_REG_ON (GP23) high or low to power on/off the CYW43 chip
+ *
+ * Configures the pad as a 4 mA SIO output, then sets or clears the
+ * GP23 SIO bit. Driving high gates power to the chip; driving low
+ * fully removes power so the chip resamples its mode-strap pins on
+ * the next rising edge.
+ *
+ * @param high   Non-zero to drive the line high (chip powered),
+ *               zero to drive it low (chip in reset)
+ * @return TIKU_DRV_OK always
+ */
 static int wl_reg_on(int high)
 {
     uint32_t bit = 1UL << WL_REG_ON_PIN;
@@ -168,6 +195,15 @@ static int wl_reg_on(int high)
     return TIKU_DRV_OK;
 }
 
+/**
+ * @brief Drive WL_DATA low briefly during chip power-up
+ *
+ * Matches the SDK's reset strap: WL_DATA is held low while WL_REG_ON
+ * rises so the chip latches the correct mode at boot. Configured as
+ * a SIO output with the 4 mA pad driver plus IE and pulldown enabled
+ * so the pad has a defined level both before and after the SIO drive
+ * takes effect.
+ */
 static void data_bootstrap_low_init(void)
 {
     uint32_t bit = 1UL << WL_DATA_PIN;
@@ -184,6 +220,14 @@ static void data_bootstrap_low_init(void)
 /* WL_CS (chip select via SIO)                                               */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Initialise WL_CS (GP25) as a GPIO output for software-driven CS
+ *
+ * CS is driven directly by the CPU around each transaction rather than
+ * folded into the PIO side-set, which keeps the firmware-upload window
+ * trick available. Configures the pad with the 12 mA fast driver and
+ * leaves CS idling high (deasserted) with output enabled.
+ */
 static void cs_init(void)
 {
     uint32_t bit = 1UL << WL_CS_PIN;
@@ -197,11 +241,17 @@ static void cs_init(void)
     _RP2350_REG(RP2350_SIO_GPIO_OE_SET)  = bit;
 }
 
+/**
+ * @brief Pull WL_CS low for the duration of a gSPI transaction
+ */
 static inline void cs_assert(void)
 {
     _RP2350_REG(RP2350_SIO_GPIO_OUT_CLR) = 1UL << WL_CS_PIN;
 }
 
+/**
+ * @brief Release WL_CS high between transactions
+ */
 static inline void cs_deassert(void)
 {
     _RP2350_REG(RP2350_SIO_GPIO_OUT_SET) = 1UL << WL_CS_PIN;
@@ -211,6 +261,13 @@ static inline void cs_deassert(void)
 /* PIO1 BUS PINS (mux WL_DATA + WL_CLOCK to PIO function)                    */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Hand WL_DATA + WL_CLOCK pin function over to PIO1
+ *
+ * Sets up the pad/IO mux so PIO1 owns both bus pins, and bypasses the
+ * default GPIO input synchroniser on WL_DATA so the PIO state machine
+ * sees pad level in the same cycle it samples.
+ */
 static void pio_pins_init(void)
 {
     /* WL_DATA: input enable on (so PIO can sample during RX),
@@ -260,6 +317,15 @@ static void pio_pins_init(void)
 /* PIO1 SM0 CONFIGURATION                                                    */
 /*---------------------------------------------------------------------------*/
 
+/**
+ * @brief Configure PIO1 SM0 clkdiv/shiftctrl/execctrl/pinctrl for gSPI
+ *
+ * Programs CLKDIV (32.0 -> ~2.3 MHz wire clock, the sweet spot for
+ * the CYW43439 turnaround timing), SHIFTCTRL (MSB-first OUT/IN with
+ * AUTOPULL+AUTOPUSH at 32 bits), PINCTRL (WL_DATA as OUT/IN/SET base,
+ * WL_CLOCK as side-set base), and EXECCTRL (wrap_top=12 / wrap_bot=0
+ * so the SM loops back to the blocking pull after each transaction).
+ */
 static void sm_configure(void)
 {
     uint32_t pinctrl;
@@ -334,6 +400,12 @@ static void sm_configure(void)
         ((uint32_t)CYW43_GSPI_WRAP_BOTTOM <<  7);
 }
 
+/**
+ * @brief Load the gSPI PIO program into PIO1 instruction memory
+ *
+ * Copies the cyw43_gspi_program[] array verbatim into the PIO1 INSTR_MEM
+ * region. Must be called before the SM is enabled.
+ */
 static void sm_load_program(void)
 {
     uint8_t i;
@@ -342,16 +414,34 @@ static void sm_load_program(void)
     }
 }
 
+/**
+ * @brief Execute a single PIO instruction without queuing
+ *
+ * Pokes the SM_INSTR register so the SM runs the given opcode on its
+ * next clock, bypassing the program counter and FIFOs.
+ *
+ * @param instr   Encoded 16-bit PIO instruction to inject
+ */
 static inline void sm_force_exec(uint16_t instr)
 {
     PIO1(RP2350_PIO_SM_INSTR(CYW43_SM)) = (uint32_t)instr;
 }
 
+/**
+ * @brief Set the SM_ENABLE bit so PIO1 SM0 starts running
+ */
 static inline void sm_enable(void)
 {
     PIO1(RP2350_PIO_CTRL) |= RP2350_PIO_CTRL_SM_ENABLE(CYW43_SM);
 }
 
+/**
+ * @brief Disable and drain the SM state
+ *
+ * Clears SM_ENABLE then asserts SM_RESTART + CLKDIV_RESTART so any
+ * mid-instruction state, shifter contents, and clock-divider phase
+ * are wiped before the SM is re-enabled.
+ */
 static inline void sm_disable_restart(void)
 {
     PIO1(RP2350_PIO_CTRL) &= ~RP2350_PIO_CTRL_SM_ENABLE(CYW43_SM);
@@ -359,7 +449,9 @@ static inline void sm_disable_restart(void)
                           |  RP2350_PIO_CTRL_CLKDIV_RESTART(CYW43_SM);
 }
 
-/*
+/**
+ * @brief Diagnostic: print PIO SM CTRL/FSTAT/FDEBUG
+ *
  * Dump the PIO block's live diagnostic state via UART. Used when
  * the chip itself isn't physically accessible (Pico 2 W has the
  * CYW43 module shielded and GP24/25/29 aren't brought out to the
@@ -381,6 +473,8 @@ static inline void sm_disable_restart(void)
  *                                PUSH because RX FIFO full
  *   [7:0]   RXSTALL [SM3..SM0] — sticky, set when SM reads RX
  *                                FIFO that's empty
+ *
+ * @param tag   Short label prepended to the log line for context
  */
 static void dump_pio_state(const char *tag)
 {
@@ -403,7 +497,9 @@ static void dump_pio_state(const char *tag)
 /* gSPI COMMAND-WORD BUILDER                                                 */
 /*---------------------------------------------------------------------------*/
 
-/*
+/**
+ * @brief Pack a gSPI 32-bit command word
+ *
  * Per the CYW43439 gSPI command structure:
  *
  *   bit 31     : C         (1 = write, 0 = read)
@@ -411,6 +507,13 @@ static void dump_pio_state(const char *tag)
  *   bits 29:28 : function  (0=bus, 1=backplane, 2=WLAN)
  *   bits 27:11 : address   (17 bits within the function space)
  *   bits 10:0  : byte count (11 bits; 0 encodes 2048 bytes)
+ *
+ * @param rw          1 = write, 0 = read
+ * @param function    gSPI function select (0=bus, 1=backplane, 2=WLAN)
+ * @param increment   1 = auto-increment address, 0 = fixed address
+ * @param address     17-bit address within the function space
+ * @param byte_count  Transfer length in bytes (11-bit field)
+ * @return Packed 32-bit command word ready for the wire
  */
 static uint32_t gspi_cmd_word(uint8_t rw, uint8_t function,
                               uint8_t increment,
@@ -429,20 +532,6 @@ static uint32_t gspi_cmd_word(uint8_t rw, uint8_t function,
 /* SINGLE-TRANSACTION PRIMITIVE                                              */
 /*---------------------------------------------------------------------------*/
 
-/*
- * One full gSPI transaction:
- *   1. Drain stale RX, clear sticky PIO flags.
- *   2. Assert CS.
- *   3. Push x_count, y_count, command, and optional payload.
- *   4. Spin until PIO has clocked payload/RX data and seen DATA high
- *      after reads.
- *   5. Drain `rx_words` data words.
- *   6. Clear PIO IRQ flag 0, then deassert CS.
- *
- * Returns TIKU_DRV_OK on success or TIKU_DRV_ERR_TIMEOUT if the
- * SM never raised IRQ within the spin budget — which is the
- * expected failure mode if the PIO state machine stalls.
- */
 /* FSTAT bit positions for SMn (RP2350 datasheet §11):
  *   bit 24+n: TXEMPTY[n]
  *   bit 16+n: TXFULL[n]
@@ -460,6 +549,30 @@ static uint32_t gspi_cmd_word(uint8_t rw, uint8_t function,
  * 1 ms budget for backwards compat with single-word reads. */
 #define CYW43_GSPI_FIFO_SPIN_LIMIT 5000UL
 
+/**
+ * @brief Run one gSPI transaction at the bit level
+ *
+ * One full gSPI transaction:
+ *   1. Drain stale RX, clear sticky PIO flags.
+ *   2. Assert CS.
+ *   3. Push x_count, y_count, command, and optional payload.
+ *   4. Spin until PIO has clocked payload/RX data and seen DATA high
+ *      after reads.
+ *   5. Drain `rx_words` data words.
+ *   6. Clear PIO IRQ flag 0, then deassert CS.
+ *
+ * Returns TIKU_DRV_OK on success or TIKU_DRV_ERR_TIMEOUT if the
+ * SM never raised IRQ within the spin budget — which is the
+ * expected failure mode if the PIO state machine stalls.
+ *
+ * @param cmd_word      Packed 32-bit gSPI command word
+ * @param tx            Pointer to TX payload words, or NULL if none
+ * @param tx_data_bits  TX payload length in bits (must be a multiple of 32)
+ * @param rx            Pointer to RX buffer, or NULL if rx_words == 0
+ * @param rx_words      Number of 32-bit RX words to capture
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID on argument
+ *         mismatch, TIKU_DRV_ERR_TIMEOUT if the SM stalls
+ */
 static int gspi_xfer_bits(uint32_t cmd_word,
                           const uint32_t *tx, uint32_t tx_data_bits,
                           uint32_t *rx, uint32_t rx_words)
@@ -582,6 +695,20 @@ static int gspi_xfer_bits(uint32_t cmd_word,
     return TIKU_DRV_OK;
 }
 
+/**
+ * @brief Higher-level wrapper around gspi_xfer_bits
+ *
+ * Handles direction (read/write) and word-count instead of bits, then
+ * defers to gspi_xfer_bits for the actual transaction.
+ *
+ * @param cmd_word   Packed 32-bit gSPI command word
+ * @param tx         Pointer to TX payload words, or NULL if tx_words == 0
+ * @param tx_words   Number of 32-bit TX payload words
+ * @param rx         Pointer to RX buffer, or NULL if rx_words == 0
+ * @param rx_words   Number of 32-bit RX words to capture
+ * @return Result of gspi_xfer_bits — TIKU_DRV_OK on success, error code
+ *         otherwise
+ */
 static int gspi_xfer(uint32_t cmd_word,
                      const uint32_t *tx, uint32_t tx_words,
                      uint32_t *rx, uint32_t rx_words)
@@ -805,6 +932,19 @@ static int gspi_write32_swapped(uint8_t function, uint32_t address,
  */
 static uint32_t bp_window_cache = 0xAAAAAAAAUL;  /* impossible value */
 
+/**
+ * @brief Program SBADDR registers so the backplane points at a 32 KB window
+ *
+ * Caches the most-recently-set window value and short-circuits the SPI
+ * write when the chip already points at the requested 32 KB region.
+ * Otherwise packs bits 8..31 of the window base into a single 32-bit
+ * write to F1/SBADDR_LOW (the chip stores the value little-endian into
+ * SBADDR_LOW/MID/HIGH).
+ *
+ * @param bp_addr   Any backplane address inside the desired 32 KB window
+ * @return TIKU_DRV_OK on success or after a cache hit, otherwise the
+ *         error code from cyw43_gspi_write32
+ */
 static int bp_set_window(uint32_t bp_addr)
 {
     uint32_t new_window = bp_addr & ~GSPI_BACKPLANE_ADDRESS_MASK;
@@ -940,7 +1080,12 @@ int cyw43_gspi_bp_write32(uint32_t bp_addr, uint32_t value)
     return gspi_xfer(cmd, &tx, 1U, (uint32_t *)0, 0U);
 }
 
-/*
+#define GSPI_BLOCK_MAX_BYTES 64U
+#define GSPI_BLOCK_MAX_WORDS ((GSPI_BLOCK_MAX_BYTES + 3U) / 4U)
+
+/**
+ * @brief Read or write a contiguous block on the chip's backplane
+ *
  * Block I/O. The cmd word's byte_count field is 11 bits (max 2047),
  * but each transaction is bounded to GSPI_BLOCK_MAX_BYTES = 64 — same
  * as embassy-rs's BACKPLANE_MAX_TRANSFER_SIZE — so the streaming TX
@@ -958,10 +1103,15 @@ int cyw43_gspi_bp_write32(uint32_t bp_addr, uint32_t value)
  * 1..3 wire bytes are written/ignored at unused register addresses
  * past the count. Pad bytes (write) / discarded bytes (read) live in
  * those positions.
+ *
+ * @param function    gSPI function select (BUS / BACKPLANE / WLAN)
+ * @param bus_addr    Function-space address for the first byte
+ * @param tx_bytes    Source buffer for writes, NULL for reads
+ * @param rx_bytes    Destination buffer for reads, NULL for writes
+ * @param byte_count  Number of bytes to transfer (1..GSPI_BLOCK_MAX_BYTES)
+ * @return TIKU_DRV_OK on success, TIKU_DRV_ERR_INVALID for a bad length,
+ *         or the error code from the underlying gspi_xfer
  */
-#define GSPI_BLOCK_MAX_BYTES 64U
-#define GSPI_BLOCK_MAX_WORDS ((GSPI_BLOCK_MAX_BYTES + 3U) / 4U)
-
 static int gspi_block_xfer(uint8_t function, uint32_t bus_addr,
                            const uint8_t *tx_bytes, uint8_t *rx_bytes,
                            uint32_t byte_count)
@@ -1102,12 +1252,24 @@ int cyw43_gspi_bp_write(uint32_t bp_addr, const uint8_t *data,
 /*---------------------------------------------------------------------------*/
 /* CORE CONTROL (disable / reset via AI wrapper registers)                   */
 /*---------------------------------------------------------------------------*/
-/*
- * disable_device_core / reset_device_core mirror embassy-rs's
- * chip::disable_device_core / reset_device_core. `base` is the AI
+
+/**
+ * @brief Issue WRAPPER ioctrl/resetctrl writes to disable a chip core
+ *
+ * Mirrors embassy-rs's chip::disable_device_core. `base` is the AI
  * wrapper base (e.g. GSPI_BACKPLANE_ARM_CORE_BASE), `halt` selects
  * the CPU-halt path for the ARM core (the SOCSRAM core never needs
  * it). All accesses go through the byte-level backplane API.
+ *
+ * If the core is already in reset, returns OK without touching ioctrl;
+ * otherwise drives ioctrl with CPUHALT (when requested), waits 1 ms,
+ * then asserts resetctrl's reset bit and waits another 1 ms.
+ *
+ * @param base   AI wrapper base address of the target core
+ * @param halt   Non-zero to assert CPUHALT (ARM core only)
+ * @param name   Short label used in diagnostic prints
+ * @return TIKU_DRV_OK on success, or the error code from the
+ *         underlying backplane read/write that failed
  */
 static int gspi_disable_core(uint32_t base, uint8_t halt, const char *name)
 {
@@ -1147,6 +1309,21 @@ static int gspi_disable_core(uint32_t base, uint8_t halt, const char *name)
     return TIKU_DRV_OK;
 }
 
+/**
+ * @brief Disable, reset, and re-enable a chip core (idempotent power-up)
+ *
+ * Mirrors embassy-rs's chip::reset_device_core. Calls gspi_disable_core
+ * first, then drives ioctrl with FGC+CLOCK_EN (and CPUHALT if `halt`),
+ * deasserts resetctrl, waits 1 ms, then clears FGC leaving CLOCK_EN
+ * (and CPUHALT if `halt`) set.
+ *
+ * @param base   AI wrapper base address of the target core
+ * @param halt   Non-zero to keep CPUHALT asserted across the sequence
+ *               (ARM core when firmware is not yet uploaded)
+ * @param name   Short label used in diagnostic prints
+ * @return TIKU_DRV_OK on success, or the first failing rc from any
+ *         underlying backplane read/write
+ */
 static int gspi_reset_core(uint32_t base, uint8_t halt, const char *name)
 {
     uint8_t v;
@@ -1186,6 +1363,19 @@ static int gspi_reset_core(uint32_t base, uint8_t halt, const char *name)
     return TIKU_DRV_OK;
 }
 
+/**
+ * @brief Check WRAPPER resetctrl/ioctrl to see if a core is running
+ *
+ * Reads the AI wrapper's ioctrl and resetctrl registers and verifies
+ * that the clock is enabled (no FGC, CLOCK_EN set) and the core is
+ * not held in reset. Logs the relevant register values either way.
+ *
+ * @param base   AI wrapper base address of the target core
+ * @param name   Short label used in diagnostic prints
+ * @return TIKU_DRV_OK if the core is up, TIKU_DRV_ERR_NOT_PRESENT if
+ *         ioctrl/resetctrl indicate it is still gated or held in reset,
+ *         or the error code from a failing backplane read
+ */
 static int gspi_core_is_up(uint32_t base, const char *name)
 {
     uint8_t io = 0U, rs = 0U;
@@ -1210,6 +1400,16 @@ static int gspi_core_is_up(uint32_t base, const char *name)
     return TIKU_DRV_OK;
 }
 
+/**
+ * @brief Toggle WL_REG_ON low for ~10 ms to fully power-cycle the chip
+ *
+ * Drives WL_REG_ON low (with CS pre-released and the WL_DATA bootstrap
+ * strap reasserted), waits long enough for the chip's internal rails
+ * to discharge, then powers it back up and re-muxes the PIO pins.
+ * Used at the start of the bus probe so the chip resamples its
+ * mode-strap pins on the rising edge of WL_REG_ON. Also resets the
+ * driver's `configured_32` / `ready` shadow flags.
+ */
 static void gspi_chip_power_cycle(void)
 {
     cs_deassert();
