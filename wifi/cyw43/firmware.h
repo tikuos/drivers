@@ -32,6 +32,13 @@ extern const uint8_t  cyw43_clm_data[];
 extern const uint8_t  cyw43_clm_data_end[];
 extern const uint32_t cyw43_clm_size;
 
+/* BT firmware blob (~6 KB Intel-HEX-like records). Uploaded into
+ * chip RAM by the BT bring-up. Only meaningful when the build
+ * enables the BT stack (TIKU_DRV_WIFI_CYW43_BT_ENABLE). */
+extern const uint8_t  cyw43_btfw_data[];
+extern const uint8_t  cyw43_btfw_data_end[];
+extern const uint32_t cyw43_btfw_size;
+
 #ifdef __cplusplus
 }
 #endif

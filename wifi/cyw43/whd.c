@@ -37,6 +37,12 @@
 #include <kernel/timers/tiku_clock.h>
 #include <kernel/timers/tiku_timer.h>
 #include <hal/tiku_gpio_irq_hal.h>
+#if TIKU_DRV_WIFI_CYW43_BT_ENABLE
+/* Only bt_transport.h is needed from this layer now -- whd.c calls
+ * cyw43_bt_init() after the WiFi bring-up completes, then the BT
+ * stack lives entirely on its own tiku_bt_runner process. */
+#include "bt_transport.h"
+#endif
 #include <string.h>
 
 /*---------------------------------------------------------------------------*/
@@ -1756,6 +1762,22 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
         /* Solid LED = WHD ready. */
         if (tiku_led_count() > 0U) tiku_led_on(0U);
 
+#if TIKU_DRV_WIFI_CYW43_BT_ENABLE
+        /* Phase 6.A/6.B: with WLAN firmware loaded and HT clock up,
+         * the chip can host the BT subsystem too — upload the BT
+         * blob and complete the BTSDIO handshake. Non-fatal on
+         * failure: WiFi is fully usable without it. */
+        {
+            int bt_rc = cyw43_bt_init();
+            if (bt_rc == TIKU_DRV_OK) {
+                CYW43_PRINTF("runner: BT subsystem ready\n");
+            } else {
+                CYW43_PRINTF("runner: BT bring-up failed rc=%d "
+                             "(WiFi unaffected)\n", bt_rc);
+            }
+        }
+#endif
+
         /* R.6 scoped: enable GPIO IRQ on WL_DATA (= GP24) — the
          * chip drives this line high when CS is deasserted to
          * signal "I have something for the host." Rising-edge IRQ
@@ -1833,7 +1855,8 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          *
          * When not joined, plain YIELD is correct: no traffic to
          * expect, so we idle-sleep until an explicit event (shell
-         * scan/connect/disconnect). */
+         * scan/connect/disconnect). The BT path runs on its own
+         * tiku_bt_runner process now; the WHD runner is purely WiFi. */
         if (cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED) {
             PT_WAIT_UNTIL_TIMEOUT(process_pt, &rx_drain_timer, 0, 1U);
         } else {
