@@ -920,7 +920,7 @@ p3b_done:
                     tiku_uart_putc('.');
                 }
             }
-            tiku_uart_putc('\n');
+            tiku_uart_puts("\n");   /* CRLF-aware terminator (no staircase) */
         }
         CYW43_PRINTF("p3.C: *** phase 3.C done ***\n");
     }
@@ -1658,7 +1658,7 @@ static int whd_scan_process_frame(unsigned int *aps_seen_inout)
                 if (c >= 0x20 && c < 0x7F) tiku_uart_putc(c);
                 else                       tiku_uart_putc('.');
             }
-            tiku_uart_putc('\n');
+            tiku_uart_puts("\n");   /* CRLF-aware terminator (no staircase) */
 
             /* Fan out the per-AP discovery event so subscribers (shell
              * scan command, future IP-config logic, etc.) can react.
