@@ -1147,6 +1147,14 @@ p3b_done:
     return TIKU_DRV_OK;
 }
 
+/* First-light join attempts are flaky: the AP's first WLC_E_LINK can read
+ * "failed" before the WPA2 4-way handshake settles, and a manual retry then
+ * joins.  Auto-retry the join this many times (via the existing backoff /
+ * auto-reconnect path) before surfacing FAILED, so a single `wifi connect`
+ * is enough.  Counted on the shared reconnect_attempts counter, which is
+ * reset to 0 on any successful join or fresh connect. */
+#define WHD_JOIN_FIRSTLIGHT_RETRIES  3U
+
 /*---------------------------------------------------------------------------*/
 /* WPA2 join helpers (phase 4.B)                                             */
 /*---------------------------------------------------------------------------*/
@@ -2200,6 +2208,21 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
                                         TIKU_WIRELESS_EVT_LINK_UP,
                                         (tiku_event_data_t)(uintptr_t)0);
+            } else if (cyw43_state.user_disconnected == 0U
+                       && cyw43_state.target_ssid_len > 0U
+                       && cyw43_state.reconnect_attempts
+                          < WHD_JOIN_FIRSTLIGHT_RETRIES) {
+                /* Flaky first-light failure -- arm the existing auto-reconnect
+                 * path (IDLE + short backoff) to retry instead of giving up,
+                 * so the user's single `wifi connect` self-heals. */
+                cyw43_state.reconnect_at_tick = (tiku_clock_time_t)
+                    (tiku_clock_time() + (tiku_clock_time_t)TIKU_CLOCK_SECOND);
+                cyw43_state.reconnect_attempts += 1U;
+                cyw43_state.link_state = TIKU_WIRELESS_LINK_IDLE;
+                CYW43_PRINTF("runner: join attempt %u failed "
+                             "(status=0x%lx); auto-retry in 1 s\n",
+                             (unsigned)cyw43_state.reconnect_attempts,
+                             (unsigned long)join_link_status);
             } else {
                 cyw43_state.link_state = TIKU_WIRELESS_LINK_FAILED;
                 CYW43_PRINTF("runner: join FAILED (link_status=0x%lx, "
