@@ -1733,6 +1733,96 @@ static void runner_health_tick(void)
     }
 }
 
+/**
+ * @brief Drain all pending F2 RX frames from the chip and dispatch them.
+ *
+ * Reads up to 32 frames out of the chip's F2 FIFO: channel-1 (event)
+ * frames feed whd_link_event_parse (post-join link-down detection +
+ * auto-reconnect scheduling); channel-2 (data) frames are handed to
+ * whd_rx_dispatch_data -> the registered eth callback -> the IP stack.
+ * No-op unless the link is up and joined. Returns the number of frames
+ * drained this call.
+ *
+ * Normally driven by the cyw43_runner process at ~128 Hz. Exposed
+ * publicly so a synchronous caller that busy-waits with the scheduler
+ * starved -- e.g. a BASIC MQTTPUB pump that can't PT_YIELD from a nested
+ * call -- can keep the RX path alive itself. Safe to call from outside
+ * the runner ONLY because such a caller does not yield, so the runner
+ * cannot run concurrently and double-drain the same FIFO.
+ */
+int whd_drain_rx(void)
+{
+    uint8_t drain_n;
+    if (!(cyw43_state.up
+          && cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED)) {
+        return 0;
+    }
+    for (drain_n = 0U; drain_n < 32U; ++drain_n) {
+        uint32_t pkt_len = 0UL;
+        (void)cyw43_gspi_f2_rx_try(whd_rx_buf,
+                                   WHD_RX_BUF_WORDS, &pkt_len);
+        if (pkt_len == 0UL) break;
+        {
+            const uint8_t *rxb = (const uint8_t *)whd_rx_buf;
+            uint8_t        ch  = (uint8_t)(rxb[5] & 0x0FU);
+            sdpcm_update_credit_from_rx(rxb);
+            /* Log the first 3 frames after join (any channel)
+             * so it's obvious the data path is alive. Caps
+             * at 3 to avoid log floods on busy networks. */
+            if (cyw43_state.rx_any_logged < 3U) {
+                CYW43_PRINTF("p4.C: rx ch=%u len=%lu\n",
+                             (unsigned)ch,
+                             (unsigned long)pkt_len);
+                cyw43_state.rx_any_logged += 1U;
+            }
+            if (ch == 1U) {
+                uint32_t st_raw = 0UL;
+                int lr = whd_link_event_parse(&st_raw);
+                if (lr < 0) {
+                    /* Disconnect / link-down event. */
+                    CYW43_PRINTF("runner: *** LINK DOWN — "
+                                 "left %s (status=0x%lx) ***\n",
+                                 cyw43_state.joined_ssid_len > 0U
+                                    ? cyw43_state.target_ssid : "?",
+                                 (unsigned long)st_raw);
+                    cyw43_state.link_state      = TIKU_WIRELESS_LINK_IDLE;
+                    cyw43_state.joined_ssid_len = 0U;
+                    cyw43_state.link_status_raw = st_raw;
+                    cyw43_state.rssi_dbm        = 0;
+                    (void)tiku_process_post(
+                        TIKU_PROCESS_BROADCAST,
+                        TIKU_WIRELESS_EVT_LINK_DOWN,
+                        (tiku_event_data_t)(uintptr_t)st_raw);
+                    /* Schedule auto-reconnect (unless the
+                     * user-initiated path explicitly cleared
+                     * target_ssid). Backoff = 1s on first
+                     * attempt, doubling up to 30s. */
+                    if (cyw43_state.user_disconnected == 0U
+                        && cyw43_state.target_ssid_len > 0U) {
+                        tiku_clock_time_t now = tiku_clock_time();
+                        uint8_t  shift = cyw43_state.reconnect_attempts;
+                        uint16_t secs  = (shift >= 5U) ? 30U
+                                                      : (uint16_t)(1U << shift);
+                        cyw43_state.reconnect_at_tick = (tiku_clock_time_t)
+                            (now + (tiku_clock_time_t)secs * TIKU_CLOCK_SECOND);
+                        if (cyw43_state.reconnect_attempts < 8U) {
+                            cyw43_state.reconnect_attempts += 1U;
+                        }
+                        CYW43_PRINTF("runner: auto-reconnect in %u s "
+                                     "(attempt %u)\n",
+                                     (unsigned)secs,
+                                     (unsigned)cyw43_state.reconnect_attempts);
+                    }
+                    /* Bail out of drain loop — we're idle now. */
+                    break;
+                }
+            }
+            (void)whd_rx_dispatch_data((uint16_t)pkt_len);
+        }
+    }
+    return (int)drain_n;
+}
+
 TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
 {
     /* Static locals survive across YIELD points (auto vars wouldn't —
@@ -1881,73 +1971,10 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          * post-join disconnects (WLC_E_LINK with link=down) are
          * detected here — without that, link_state would stay
          * JOINED forever even after the AP kicks us off. */
-        if (cyw43_state.up && cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED) {
-            uint8_t drain_n;
-            for (drain_n = 0U; drain_n < 32U; ++drain_n) {
-                uint32_t pkt_len = 0UL;
-                (void)cyw43_gspi_f2_rx_try(whd_rx_buf,
-                                           WHD_RX_BUF_WORDS, &pkt_len);
-                if (pkt_len == 0UL) break;
-                {
-                    const uint8_t *rxb = (const uint8_t *)whd_rx_buf;
-                    uint8_t        ch  = (uint8_t)(rxb[5] & 0x0FU);
-                    sdpcm_update_credit_from_rx(rxb);
-                    /* Log the first 3 frames after join (any channel)
-                     * so it's obvious the data path is alive. Caps
-                     * at 3 to avoid log floods on busy networks. */
-                    if (cyw43_state.rx_any_logged < 3U) {
-                        CYW43_PRINTF("p4.C: rx ch=%u len=%lu\n",
-                                     (unsigned)ch,
-                                     (unsigned long)pkt_len);
-                        cyw43_state.rx_any_logged += 1U;
-                    }
-                    if (ch == 1U) {
-                        uint32_t st_raw = 0UL;
-                        int lr = whd_link_event_parse(&st_raw);
-                        if (lr < 0) {
-                            /* Disconnect / link-down event. */
-                            CYW43_PRINTF("runner: *** LINK DOWN — "
-                                         "left %s (status=0x%lx) ***\n",
-                                         cyw43_state.joined_ssid_len > 0U
-                                            ? cyw43_state.target_ssid : "?",
-                                         (unsigned long)st_raw);
-                            cyw43_state.link_state      = TIKU_WIRELESS_LINK_IDLE;
-                            cyw43_state.joined_ssid_len = 0U;
-                            cyw43_state.link_status_raw = st_raw;
-                            cyw43_state.rssi_dbm        = 0;
-                            (void)tiku_process_post(
-                                TIKU_PROCESS_BROADCAST,
-                                TIKU_WIRELESS_EVT_LINK_DOWN,
-                                (tiku_event_data_t)(uintptr_t)st_raw);
-                            /* Schedule auto-reconnect (unless the
-                             * user-initiated path explicitly cleared
-                             * target_ssid). Backoff = 1s on first
-                             * attempt, doubling up to 30s. */
-                            if (cyw43_state.user_disconnected == 0U
-                                && cyw43_state.target_ssid_len > 0U) {
-                                tiku_clock_time_t now = tiku_clock_time();
-                                uint8_t  shift = cyw43_state.reconnect_attempts;
-                                uint16_t secs  = (shift >= 5U) ? 30U
-                                                              : (uint16_t)(1U << shift);
-                                cyw43_state.reconnect_at_tick = (tiku_clock_time_t)
-                                    (now + (tiku_clock_time_t)secs * TIKU_CLOCK_SECOND);
-                                if (cyw43_state.reconnect_attempts < 8U) {
-                                    cyw43_state.reconnect_attempts += 1U;
-                                }
-                                CYW43_PRINTF("runner: auto-reconnect in %u s "
-                                             "(attempt %u)\n",
-                                             (unsigned)secs,
-                                             (unsigned)cyw43_state.reconnect_attempts);
-                            }
-                            /* Bail out of drain loop — we're idle now. */
-                            break;
-                        }
-                    }
-                    (void)whd_rx_dispatch_data((uint16_t)pkt_len);
-                }
-            }
-
-        }
+        /* Drain ALL pending F2 frames before yielding (extracted to
+         * whd_drain_rx so a synchronous caller -- e.g. BASIC MQTTPUB --
+         * can drive the same RX path while it busy-waits). */
+        (void)whd_drain_rx();
 
         /* Auto-reconnect: when link is IDLE, the user didn't ask for
          * disconnect, a target SSID is still configured, and the

@@ -181,6 +181,19 @@ int whd_register_rx_callback(whd_rx_eth_cb_t cb, void *ctx);
  */
 int whd_tx_eth(const uint8_t *frame, uint16_t len);
 
+/**
+ * @brief Drain and dispatch all pending RX frames from the chip's F2
+ *        FIFO.  Returns the number of frames handled (0 if the link is
+ *        not up/joined).
+ *
+ * Normally driven by the cyw43_runner process; also callable directly by
+ * a synchronous busy-waiter that has starved the scheduler (e.g. a BASIC
+ * MQTTPUB pump) so the IP-stack RX path keeps flowing.  Safe to call from
+ * outside the runner only while that runner cannot run concurrently
+ * (i.e. the caller never yields during its busy-wait).
+ */
+int whd_drain_rx(void);
+
 #ifdef __cplusplus
 }
 #endif
