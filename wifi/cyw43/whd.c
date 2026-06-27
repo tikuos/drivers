@@ -1426,7 +1426,14 @@ static int whd_join_prepare(const char *psk, uint8_t auth)
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: auth FAIL rc=%d\n", rc); return rc; }
 
     rc = whd_set_iovar_u32("mfp", mfp_val);
-    if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: mfp FAIL rc=%d\n", rc); return rc; }
+    if (rc != TIKU_DRV_OK) {
+        /* 802.11w MFP is mandatory for WPA3-SAE but optional for WPA2-PSK.
+         * Some firmware states reject the "mfp" iovar (IOCTL error) yet still
+         * associate fine to a WPA2 AP -- only abort when MFP is REQUIRED. */
+        CYW43_PRINTF("join: mfp set rc=%d (%s)\n", rc,
+                     mfp_val == WHD_MFP_REQUIRED ? "fatal" : "ignored for WPA2");
+        if (mfp_val == WHD_MFP_REQUIRED) return rc;
+    }
 
     rc = whd_ioctl_set_u32(WHD_CMD_SET_WPA_AUTH, wpa_auth_val);
     if (rc != TIKU_DRV_OK) { CYW43_PRINTF("join: wpa_auth FAIL rc=%d\n", rc); return rc; }
