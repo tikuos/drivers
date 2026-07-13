@@ -29,7 +29,6 @@
 #include "gspi.h"
 #include "firmware.h"
 #include "tiku.h"
-#include <arch/arm-rp2350/tiku_uart_arch.h>
 #include <interfaces/led/tiku_led.h>
 #include <kernel/cpu/tiku_watchdog.h>
 #include <kernel/memory/tiku_mem.h>
@@ -81,6 +80,31 @@
 #ifndef CYW43_PRINTF
 #define CYW43_PRINTF(...) TIKU_PRINTF("[cyw43] " __VA_ARGS__)
 #endif
+
+/* Print a length-bounded byte string through TIKU_PRINTF, sanitising
+ * newlines/CRs to ' ' and other non-printable bytes to '.'.  Used for
+ * chip-supplied strings (SSIDs, the fw "ver" banner).  Must follow the
+ * console like CYW43_PRINTF does: these bytes used to go out via
+ * tiku_uart_putc(), which on a native-USB console build (TIKU_CONSOLE=usb,
+ * the Pico 2 W default) is the unwired UART0 pins -- scan results showed
+ * "SSID=" with no name and no line break.  Chunked so stack cost stays
+ * small for arbitrary lengths. */
+static void whd_print_bytes(const uint8_t *s, uint32_t n)
+{
+    char chunk[33];
+    uint32_t i = 0U;
+    while (i < n) {
+        uint32_t k = 0U;
+        while (k < (uint32_t)(sizeof chunk - 1U) && i < n) {
+            char c = (char)s[i++];
+            if (c == '\n' || c == '\r')      chunk[k++] = ' ';
+            else if (c >= 0x20 && c < 0x7F)  chunk[k++] = c;
+            else                             chunk[k++] = '.';
+        }
+        chunk[k] = '\0';
+        TIKU_PRINTF("%s", chunk);
+    }
+}
 
 /*---------------------------------------------------------------------------*/
 /* WHD STATE                                                                 */
@@ -908,19 +932,10 @@ p3b_done:
                      (unsigned long)resp_len);
         {
             uint32_t n = (resp_len < sizeof iov_buf) ? resp_len : sizeof iov_buf;
-            uint32_t j;
-            for (j = 0U; j < n; ++j) {
-                char c = (char)iov_buf[j];
-                if (c == '\0') break;
-                if (c == '\n' || c == '\r') {
-                    tiku_uart_putc(' ');
-                } else if (c >= 0x20 && c < 0x7F) {
-                    tiku_uart_putc(c);
-                } else {
-                    tiku_uart_putc('.');
-                }
-            }
-            tiku_uart_puts("\n");   /* CRLF-aware terminator (no staircase) */
+            uint32_t len = 0U;
+            while (len < n && iov_buf[len] != 0U) len++;   /* stop at NUL */
+            whd_print_bytes(iov_buf, len);
+            TIKU_PRINTF("\n");
         }
         CYW43_PRINTF("p3.C: *** phase 3.C done ***\n");
     }
@@ -1668,12 +1683,8 @@ static int whd_scan_process_frame(unsigned int *aps_seen_inout)
                          bssid[0], bssid[1], bssid[2],
                          bssid[3], bssid[4], bssid[5],
                          (int)rssi, chanspec & 0xFFU);
-            for (i = 0U; i < ssid_l; ++i) {
-                char c = (char)ssid[i];
-                if (c >= 0x20 && c < 0x7F) tiku_uart_putc(c);
-                else                       tiku_uart_putc('.');
-            }
-            tiku_uart_puts("\n");   /* CRLF-aware terminator (no staircase) */
+            whd_print_bytes(ssid, ssid_l);
+            TIKU_PRINTF("\n");
 
             /* Fan out the per-AP discovery event so subscribers (shell
              * scan command, future IP-config logic, etc.) can react.
@@ -1986,8 +1997,12 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
         /* Auto-reconnect: when link is IDLE, the user didn't ask for
          * disconnect, a target SSID is still configured, and the
          * backoff window has elapsed, re-post JOIN_START. Wrap-safe
-         * "now >= reconnect_at_tick" check uses (now - then) <
-         * 0x80000000 -- negative deltas wrap to large values. */
+         * "now >= reconnect_at_tick" check: (now - then) below HALF the
+         * type's range -- negative deltas wrap to large values. The
+         * half-range must be derived from tiku_clock_time_t (16-bit,
+         * tiku.h): the old literal 0x80000000UL truncated to 0 in the
+         * cast, making the guard "delta < 0" -- always false, so idle
+         * auto-reconnect never fired. */
         if (cyw43_state.up
             && cyw43_state.link_state == TIKU_WIRELESS_LINK_IDLE
             && cyw43_state.user_disconnected == 0U
@@ -1995,7 +2010,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
             && cyw43_state.reconnect_attempts > 0U
             && (tiku_clock_time_t)(tiku_clock_time()
                                    - cyw43_state.reconnect_at_tick)
-               < (tiku_clock_time_t)0x80000000UL) {
+               < (tiku_clock_time_t)(((tiku_clock_time_t)-1 >> 1) + 1)) {
             CYW43_PRINTF("runner: auto-reconnect (idle): re-posting JOIN_START\n");
             cyw43_state.link_state = TIKU_WIRELESS_LINK_CONNECTING;
             (void)tiku_process_post(&cyw43_runner,
