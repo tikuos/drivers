@@ -67,12 +67,11 @@ Pin defines come from `arch/arm-rp2350/boards/tiku_board_rpi_pico2_w.h`
 ## Firmware blob
 
 The chip's internal Cortex-M3 needs ~225 KB of Infineon firmware
-uploaded after every reset. Place the binary at
-`firmware/43439A0.bin` with the redistribution licence file at
-`firmware/LICENSE.infineon` alongside.
+uploaded after every reset; `firmware.S` embeds the WLAN/CLM/BT/NVRAM
+blobs from `firmware/` via `.incbin`.
 
-Source: <https://github.com/Infineon/wifi-host-driver/tree/master/resources/firmware/COMPONENT_43439>
-
-The firmware is permissively redistributable for use with the
-CYW43439 chip; the LICENSE file in the same directory carries
-the full terms.
+The blobs are **not tracked in git** — they are Infineon
+**Permissive Binary License 1.0** binaries, so the repo keeps only
+the licence text plus download + SHA-256 verification instructions:
+see `firmware/README.md`. `build.mk` fails with a pointer to that
+file when the blobs are missing.

@@ -13,6 +13,24 @@
 # tikukits/net/bluetooth/.
 
 ifeq ($(TIKU_DRV_WIFI_CYW43_ENABLE),1)
+# The Infineon firmware blobs are NOT tracked in git (binary-only PBL
+# licence; the repos ship only Apache-2.0 content). Fail early with
+# instructions instead of a cryptic .incbin assembler error. `clean`
+# is exempt, mirroring the APP=net guard in the top-level Makefile.
+CYW43_FW_DIR   := drivers/wifi/cyw43/firmware
+CYW43_FW_FILES := $(CYW43_FW_DIR)/43439A0.bin \
+                  $(CYW43_FW_DIR)/43439A0_clm.bin \
+                  $(CYW43_FW_DIR)/43439A0_btfw.bin \
+                  $(CYW43_FW_DIR)/nvram.bin
+CYW43_FW_MISSING := $(filter-out $(wildcard $(CYW43_FW_FILES)),$(CYW43_FW_FILES))
+ifneq ($(CYW43_FW_MISSING),)
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+$(error cyw43: firmware blob(s) missing: $(CYW43_FW_MISSING) -- not \
+tracked in git. See $(CYW43_FW_DIR)/README.md for the download + \
+SHA-256 verification commands (Infineon PBL-licensed binaries))
+endif
+endif
+
 # Explicit source list rather than $(wildcard) so we can gate
 # individual files (bt.c) on sub-flags.
 SRCS     += drivers/wifi/cyw43/tiku_drv_wifi_cyw43.c

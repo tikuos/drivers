@@ -1,0 +1,3 @@
+# Infineon firmware blobs: kept out of git (binary-only PBL licence).
+# Download + verify per README.md in this directory.
+/*.bin
