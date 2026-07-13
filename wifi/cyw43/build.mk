@@ -20,8 +20,11 @@ ifeq ($(TIKU_DRV_WIFI_CYW43_ENABLE),1)
 CYW43_FW_DIR   := drivers/wifi/cyw43/firmware
 CYW43_FW_FILES := $(CYW43_FW_DIR)/43439A0.bin \
                   $(CYW43_FW_DIR)/43439A0_clm.bin \
-                  $(CYW43_FW_DIR)/43439A0_btfw.bin \
                   $(CYW43_FW_DIR)/nvram.bin
+# The BT blob is needed (and .incbin'd by firmware.S) only in BT builds.
+ifeq ($(TIKU_DRV_WIFI_CYW43_BT_ENABLE),1)
+CYW43_FW_FILES += $(CYW43_FW_DIR)/43439A0_btfw.bin
+endif
 CYW43_FW_MISSING := $(filter-out $(wildcard $(CYW43_FW_FILES)),$(CYW43_FW_FILES))
 ifneq ($(CYW43_FW_MISSING),)
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
@@ -38,13 +41,13 @@ SRCS     += drivers/wifi/cyw43/gspi.c
 SRCS     += drivers/wifi/cyw43/whd.c
 
 # firmware.S pulls in 43439A0.bin (~225 KB), nvram.bin (~750 B),
-# 43439A0_clm.bin (~1 KB), and 43439A0_btfw.bin (~6 KB) via .incbin.
-# The chip's own Cortex-M3 needs the firmware blob uploaded after
-# every reset (the chip has no non-volatile storage), so the blobs
-# live in RP2350 flash and the driver streams them across gSPI on
-# every boot. The BT blob is included unconditionally — at 6 KB the
-# cost is negligible and keeping the .S monolithic avoids juggling
-# .incbin paths under conditionals.
+# 43439A0_clm.bin (~1 KB) — and, in BT builds only, 43439A0_btfw.bin
+# (~6 KB) — via .incbin. The chip's own Cortex-M3 needs the firmware
+# blob uploaded after every reset (the chip has no non-volatile
+# storage), so the blobs live in RP2350 flash and the driver streams
+# them across gSPI on every boot. The BT .incbin is gated on
+# TIKU_DRV_WIFI_CYW43_BT_ENABLE: the blobs are downloaded rather than
+# tracked, so a WiFi-only checkout has no BT blob to include.
 ASM_SRCS += drivers/wifi/cyw43/firmware.S
 CFLAGS   += -DTIKU_DRV_WIFI_CYW43_ENABLE=1
 

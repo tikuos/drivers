@@ -79,10 +79,11 @@ cyw43_clm_size:
     /* BT firmware blob — separate from the WiFi firmware (despite
      * sharing a chip). Uploaded into chip RAM by phase 6.A bring-up
      * via the backplane window, parsed line-by-line as Intel-HEX-
-     * like records. Only included when the build enables the BT
-     * stack (TIKU_DRV_WIFI_CYW43_BT_ENABLE), to keep non-BT builds
-     * lean — the blob is ~6 KB but the bring-up + transport code
-     * is another ~1-2 KB. */
+     * like records. Gated on TIKU_DRV_WIFI_CYW43_BT_ENABLE: the blobs
+     * are downloaded, not tracked in git (see firmware/README.md), so
+     * a WiFi-only checkout has no 43439A0_btfw.bin — an unconditional
+     * .incbin failed those builds at assembly even with BT disabled. */
+#if defined(TIKU_DRV_WIFI_CYW43_BT_ENABLE)
     .section .rodata.cyw43_btfw, "a", %progbits
     .balign 4
     .global cyw43_btfw_data
@@ -100,3 +101,4 @@ cyw43_btfw_data_end:
 cyw43_btfw_size:
     .word cyw43_btfw_data_end - cyw43_btfw_data
     .size cyw43_btfw_size, . - cyw43_btfw_size
+#endif /* TIKU_DRV_WIFI_CYW43_BT_ENABLE */
