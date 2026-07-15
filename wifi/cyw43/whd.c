@@ -186,8 +186,7 @@ typedef struct {
     uint32_t xor_check;      /* xor of all bytes above (sanity) */
 } wifi_cred_persist_t;
 
-static wifi_cred_persist_t __attribute__((section(".persistent")))
-    wifi_cred_nvm;
+static TIKU_DURABLE wifi_cred_persist_t wifi_cred_nvm;
 
 /**
  * @brief Compute XOR checksum for a credential record
