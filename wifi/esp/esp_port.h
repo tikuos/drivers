@@ -1,9 +1,10 @@
 /*
  * Tiku Drivers - ESP32-C61 radio, what the driver's pieces share
  *
- * esp_osi.c is the OS the libraries see, esp_phy.c the modem's clocks and
- * the PHY, tiku_drv_wifi_esp.c the radio's life cycle.  Internal: nothing
- * outside drivers/wifi/esp includes this.
+ * esp_core.c is what both radios stand on, esp_osi.c the OS the libraries
+ * see, esp_phy.c the modem's clocks and the PHY; tiku_drv_wifi_esp.c and
+ * esp_ble.c are the radios' life cycles.  Internal: nothing outside
+ * drivers/wifi/esp includes this.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,11 +16,58 @@
 #include <stdint.h>
 
 #include <hal/tiku_printf_hal.h>
+#include <kernel/threads/tiku_thread.h>
+#include <kernel/timers/tiku_clock.h>
 #include "esp_abi.h"
 
 #define ESPW_PRINTF(...) TIKU_PRINTF("[esp-wifi] " __VA_ARGS__)
+#define ESPB_PRINTF(...) TIKU_PRINTF("[esp-ble] " __VA_ARGS__)
+
+/* esp_core.c --------------------------------------------------------------*/
+
+/* The radios, as the core counts them. */
+#define ESPW_RADIO_WIFI     (1U << 0)
+#define ESPW_RADIO_BLE      (1U << 1)
+
+/**
+ * @brief What a radio stands on: the libraries' heap (@p heap_bytes from the
+ *        SRAM tier, or what an earlier start kept), the modem's gating and
+ *        the timer service.  One radio at a time until coexistence lands.
+ *        Kernel thread only.  @return 0, or -1 (said why)
+ */
+int espw_core_up(uint8_t radio, uint32_t heap_bytes);
+
+/** @brief The radio is down: the last one stops the timer service and gives
+ *         the heap back if nothing is left in it. */
+void espw_core_down(uint8_t radio);
+
+/** @brief The radios up now (ESPW_RADIO_*). */
+uint8_t espw_core_radios(void);
 
 /* esp_osi.c ---------------------------------------------------------------*/
+
+/** @brief A wait's end, set once so a woken waiter does not start over. */
+typedef struct {
+    uint8_t           forever;
+    tiku_clock_time_t until;
+} espw_deadline_t;
+
+/** @brief A deadline @p ms from now; OSI_FUNCS_TIME_BLOCKING has none. */
+void espw_deadline_start(espw_deadline_t *d, uint32_t ms);
+
+/**
+ * @brief Block on @p q once, inside one atomic section; the caller tests its
+ *        condition again after.  A task deleted meanwhile ends here.
+ *        @return 0 once nothing more may be waited: a zero timeout, an
+ *        interrupt handler, or the deadline gone by
+ */
+int espw_deadline_wait(tiku_waitq_t *q, espw_deadline_t *d, uint32_t ms);
+
+/** @brief The running thread as a lock owner: a worker, or the kernel. */
+void *espw_self(void);
+
+/** @brief Sleep @p ms; 0 yields. */
+void espw_delay_ms(uint32_t ms);
 
 /** @brief The table handed to esp_wifi_init_internal(). */
 extern wifi_osi_funcs_t espw_osi_funcs;
@@ -59,9 +107,22 @@ void espw_modem_wifi_reset(void);
  *         restarts, as the MAC keeps state behind them. */
 void espw_modem_wifi_inited(int on);
 
-/** @brief The PHY on (calibrating it the first time) or off. */
+/** @brief The BLE MAC's clocks on (its resets pulsed, its sleep clock the
+ *         crystal / 400), or off. */
+void espw_modem_bt_on(void);
+void espw_modem_bt_off(void);
+
+/** @brief The BLE timer's sleep clock, in Hz. */
+uint32_t espw_modem_bt_lp_hz(void);
+
+/** @brief The PHY on for Wi-Fi (calibrating it the first time) or off; it
+ *         powers down after the last radio's off. */
 void espw_phy_enable(void);
 void espw_phy_disable(void);
+
+/** @brief The same for BLE. */
+void espw_phy_bt_enable(void);
+void espw_phy_bt_disable(void);
 
 /** @brief The last calibration: its result and how long it took, and
  *         whether it ran since the last ask (a restart wakes the PHY). */

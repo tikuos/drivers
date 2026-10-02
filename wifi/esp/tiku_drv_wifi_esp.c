@@ -15,7 +15,6 @@
 
 #include <hal/tiku_cpu.h>
 #include <interfaces/wireless/tiku_wireless.h>
-#include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
 #include <kernel/threads/tiku_thread.h>
 #include <kernel/timers/tiku_clock.h>
@@ -63,9 +62,7 @@ static void *const espw_roots[] = {
 
 static uint8_t      espw_ready;         /* xip.bin is this build's */
 static uint8_t      espw_up;
-static uint8_t      espw_heap_taken;
 static uint8_t      espw_mac[6];
-static tiku_arena_t espw_heap_arena;
 
 /* The last scan: what it found, how long it took, whether one runs. */
 static tiku_wireless_ap_t espw_aps[TIKU_WIRELESS_MAX_SCAN_RESULTS];
@@ -496,56 +493,29 @@ static void espw_config(wifi_init_config_t *c) {
 }
 
 /**
- * @brief Undo whatever of the bring-up happened, in reverse.  The heap goes
- *        back only empty: a block the libraries kept, or a task that did
- *        not end, keeps it taken (and says so) for the next start.
+ * @brief Undo the bring-up from @p stage on, in reverse: 3 the stack was
+ *        initialised, 2 only the core is up.  The core gives the heap back
+ *        only empty: a block the libraries kept, or a task that did not
+ *        end, keeps it taken (and says so) for the next start.
  */
 static void espw_teardown(int stage) {
-    int ended = 1;
-
     if (stage >= 3) {
         espw_wpa_unregister();
         (void)esp_wifi_deinit_internal();
         espw_modem_wifi_inited(0);
         espw_modem_wifi_clock_off();
     }
-    if (stage >= 2) {
-        ended = espw_osi_stop() == 0;
-    }
-    if (ended && espw_heap_used() == 0U) {
-        espw_heap_reset();
-        (void)tiku_mem_workspace_close(&espw_heap_arena);
-        espw_heap_taken = 0U;
-    } else {
-        ESPW_PRINTF("heap kept: %lu bytes still in use\n",
-                    (unsigned long)espw_heap_used());
-    }
+    espw_core_down(ESPW_RADIO_WIFI);
 }
 
 static int espw_power_up(void) {
-    tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
     wifi_init_config_t cfg;
     espw_heap_stats_t st;
     esp_err_t rc;
     uint32_t cal_us;
     int fresh;
 
-    if (!espw_heap_taken) {
-        req.alignment = 8U;
-        req.allocation_class = TIKU_MEM_TRANSIENT;
-        if (tiku_mem_workspace_open(&espw_heap_arena,
-                                    TIKU_DRV_WIFI_ESP_HEAP_BYTES, &req) !=
-            TIKU_MEM_OK) {
-            ESPW_PRINTF("no %u KB for the radio's heap in the SRAM tier\n",
-                        TIKU_DRV_WIFI_ESP_HEAP_BYTES / 1024U);
-            return TIKU_DRV_ERR_INIT;
-        }
-        espw_heap_init(espw_heap_arena.buf, espw_heap_arena.capacity);
-        espw_heap_taken = 1U;
-    }
-    espw_modem_init();
-    if (espw_osi_start() != 0) {
-        espw_teardown(2);
+    if (espw_core_up(ESPW_RADIO_WIFI, TIKU_DRV_WIFI_ESP_HEAP_BYTES) != 0) {
         return TIKU_DRV_ERR_INIT;
     }
 

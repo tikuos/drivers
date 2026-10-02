@@ -29,8 +29,19 @@
 #define SYSCON_CLK_CONF1    (SYSCON_BASE + 0x14UL)
 
 #define CONF_I2C_MST_160M   (1UL << 12)         /* in SYSCON_CLK_CONF */
+#define CONF_ETM            (1UL << 22)
+#define CONF_SEC_ECB        (1UL << 25)
+#define CONF_SEC_CCM        (1UL << 26)
+#define CONF_SEC_BAH        (1UL << 27)
 #define CONF_SEC_APB        (1UL << 28)
+#define CONF_SEC            (1UL << 29)
+#define CONF_BLE_TIMER      (1UL << 30)
 #define RST_WIFIMAC         (1UL << 9)
+/* The BLE MAC's resets: its APB side, the MAC, the BLE timer, the modem's
+ * security block (ECB, CCM, BAH and its core). */
+#define RST_BT              ((1UL << 15) | (1UL << 16) | (1UL << 25) | \
+                             (1UL << 26) | (1UL << 27) | (1UL << 29) | \
+                             (1UL << 30))
 
 /* SYSCON_CLK_CONF1: the Wi-Fi baseband's clocks, its MAC, the front end. */
 #define CLK_WIFIBB          0x1FBUL             /* 22M..160X1 but 44M */
@@ -42,6 +53,7 @@
 #define CLK_FE_APB          (1UL << 15)
 #define CLK_BT_APB          (1UL << 16)
 #define CLK_BTBB            (1UL << 17)
+#define CLK_BTMAC           (1UL << 18)
 #define CLK_FE_PWDET        (1UL << 19)
 #define CLK_FE_ADC          (1UL << 20)
 #define CLK_FE_DAC          (1UL << 21)
@@ -51,6 +63,7 @@
 
 /* MODEM_LPCON: the modem's low-power clocks and their gate maps. */
 #define LPCON_BASE          0x600AF000UL
+#define LPCON_LP_TIMER      (LPCON_BASE + 0x04UL)
 #define LPCON_WIFI_LP_CLK   (LPCON_BASE + 0x0CUL)
 #define LPCON_CLK_CONF      (LPCON_BASE + 0x18UL)
 #define LPCON_ICG_MAPS      (LPCON_BASE + 0x20UL)
@@ -60,6 +73,16 @@
 #define LPCON_WIFIPWR       (1UL << 0)
 #define LPCON_COEX          (1UL << 1)
 #define LPCON_I2C_MST       (1UL << 2)
+#define LPCON_LP_TIMER_EN   (1UL << 3)
+
+/* The BLE timer's sleep clock: the main crystal over 400 = 100 kHz, as IDF
+ * picks by default (LP_TIMER: source bits 3:0, bit 2 the crystal; the
+ * divider less one in bits 15:4). */
+#define LP_TIMER_SEL_MSK    0xFUL
+#define LP_TIMER_SEL_XTAL   (1UL << 2)
+#define LP_TIMER_DIV_S      4U
+#define LP_TIMER_DIV_MSK    (0xFFFUL << LP_TIMER_DIV_S)
+#define BT_LP_DIV           400UL
 
 /* Clock-gate maps: a domain runs in the PMU modem states its bits name;
  * 2 = the modem state, 4 = active (IDF's ICG codes 1 and 2). */
@@ -71,10 +94,16 @@
 #define LPCON_ICG_OR        ((ICG_ACTIVE_MODEM << 16) | (ICG_ACTIVE_MODEM << 20) | \
                              (ICG_ACTIVE_MODEM << 24) | (ICG_ACTIVE_MODEM << 28))
 
-/* The groups: the PHY's front end, its calibration, and the Wi-Fi MAC. */
+/* The groups: the PHY's front end, its calibration, the Wi-Fi MAC and the
+ * BLE MAC with what it leans on (ETM, coexistence, security, its timer). */
 #define MOD_PHY             (1U << 0)
 #define MOD_PHY_CAL         (1U << 1)
 #define MOD_WIFI            (1U << 2)
+#define MOD_BT              (1U << 3)
+
+/* Which radios have the PHY on. */
+#define PHY_WIFI            (1U << 0)
+#define PHY_BT              (1U << 1)
 
 /* The PHY's defaults: version 1, then TX power caps in quarter dBm per rate
  * group (at most 20 dBm), the rest zero, and a closing 0x51. */
@@ -86,8 +115,10 @@ static const uint8_t phy_init_data[128] = {
 };
 
 static uint8_t  modem_mods;
+static uint8_t  modem_applied;          /* modem_mods with what is held */
 static uint8_t  wifi_inited;
 static uint8_t  phy_on;
+static uint8_t  phy_modems;             /* PHY_WIFI, PHY_BT */
 static uint8_t  phy_calibrated;
 static int      phy_cal_rc = -1;
 static uint32_t phy_cal_us;
@@ -110,37 +141,52 @@ static uint32_t mod_clk1(uint8_t mods) {
     if (mods & MOD_WIFI) {
         c |= CLK_WIFIMAC | CLK_WIFI_APB | CLK_WIFIBB | CLK_WIFIBB_44M;
     }
+    if (mods & MOD_BT) {
+        c |= CLK_BTMAC | CLK_BTBB | CLK_BT_APB;
+    }
     return c;
 }
 
+/** @brief CLK_CONF bits a group needs. */
+static uint32_t mod_clk0(uint8_t mods) {
+    uint32_t c = 0UL;
+
+    if (mods & MOD_PHY_CAL) {
+        c |= CONF_SEC_APB;
+    }
+    if (mods & MOD_BT) {
+        c |= CONF_ETM | CONF_SEC_ECB | CONF_SEC_CCM | CONF_SEC_BAH |
+             CONF_SEC_APB | CONF_SEC | CONF_BLE_TIMER;
+    }
+    return c;
+}
+
+/** @brief The LPCON clocks a group needs: coexistence, for either MAC. */
+static uint32_t mod_lp(uint8_t mods) {
+    return (mods & (MOD_WIFI | MOD_BT)) ? LPCON_COEX : 0UL;
+}
+
 /**
- * @brief Move the modem's clocks from one set of groups to another.  The
- *        front end's clocks, once on, stay on; so do the Wi-Fi ones once
- *        the stack is up; and the analog I2C master never stops, as the
- *        clock tree's own PLL writes go through it too.
+ * @brief Move the modem's clocks from one set of groups to another: a
+ *        group's bits go off unless another group still on needs them.  The
+ *        front end's clocks, once on, stay on; so do the Wi-Fi ones while
+ *        the stack is up; the analog I2C master never stops.
  */
 static void modem_set(uint8_t mods) {
-    uint32_t keep = CLK_FE_80M | CLK_FE_APB | CLK_FE_160M | CLK_FE_ADC |
-                    CLK_FE_DAC | CLK_FE_PWDET;
-    uint32_t want = mod_clk1(mods), m;
+    uint8_t now = (uint8_t)(mods | (wifi_inited ? MOD_WIFI : 0U));
+    uint32_t fe = mod_clk1(MOD_PHY), m;
 
-    if (wifi_inited) {
-        keep |= mod_clk1(MOD_WIFI);
-    }
     m = tiku_esp32c61_mie_off();
     TIKU_REG32(SYSCON_CLK_CONF1) =
-        (TIKU_REG32(SYSCON_CLK_CONF1) & (keep | ~mod_clk1(modem_mods))) | want;
-    if (mods & MOD_PHY_CAL) {
-        TIKU_REG32(SYSCON_CLK_CONF) |= CONF_SEC_APB;
-    } else if (modem_mods & MOD_PHY_CAL) {
-        TIKU_REG32(SYSCON_CLK_CONF) &= ~CONF_SEC_APB;
-    }
-    if (mods & MOD_WIFI) {
-        TIKU_REG32(LPCON_CLK_CONF) |= LPCON_COEX;
-    } else if ((modem_mods & MOD_WIFI) && !wifi_inited) {
-        TIKU_REG32(LPCON_CLK_CONF) &= ~LPCON_COEX;
-    }
+        (TIKU_REG32(SYSCON_CLK_CONF1) & ~(mod_clk1(modem_applied) & ~fe)) |
+        mod_clk1(now);
+    TIKU_REG32(SYSCON_CLK_CONF) =
+        (TIKU_REG32(SYSCON_CLK_CONF) & ~mod_clk0(modem_applied)) |
+        mod_clk0(now);
+    TIKU_REG32(LPCON_CLK_CONF) =
+        (TIKU_REG32(LPCON_CLK_CONF) & ~mod_lp(modem_applied)) | mod_lp(now);
     modem_mods = mods;
+    modem_applied = now;
     tiku_esp32c61_mie_restore(m);
 }
 
@@ -166,6 +212,7 @@ void espw_modem_init(void) {
         (TIKU_REG32(LPCON_WIFI_LP_CLK) & ~LP_SEL_MSK) | LP_SEL_RC_SLOW;
     TIKU_REG32(LPCON_CLK_CONF) |= LPCON_WIFIPWR;
     modem_mods = 0U;
+    modem_applied = 0U;
     wifi_inited = 0U;
     tiku_esp32c61_mie_restore(m);
     if (phy_lock == NULL) {
@@ -189,6 +236,33 @@ void espw_modem_wifi_reset(void) {
     tiku_esp32c61_mie_restore(m);
 }
 
+void espw_modem_bt_on(void) {
+    uint32_t m;
+
+    modem_set(modem_mods | MOD_BT);
+    m = tiku_esp32c61_mie_off();
+    TIKU_REG32(SYSCON_RST_CONF) |= RST_BT;
+    TIKU_REG32(SYSCON_RST_CONF) &= ~RST_BT;
+    TIKU_REG32(LPCON_LP_TIMER) =
+        (TIKU_REG32(LPCON_LP_TIMER) & ~(LP_TIMER_SEL_MSK | LP_TIMER_DIV_MSK)) |
+        LP_TIMER_SEL_XTAL | ((BT_LP_DIV - 1UL) << LP_TIMER_DIV_S);
+    TIKU_REG32(LPCON_CLK_CONF) |= LPCON_LP_TIMER_EN;
+    tiku_esp32c61_mie_restore(m);
+}
+
+void espw_modem_bt_off(void) {
+    uint32_t m = tiku_esp32c61_mie_off();
+
+    TIKU_REG32(LPCON_LP_TIMER) &= ~LP_TIMER_SEL_MSK;
+    TIKU_REG32(LPCON_CLK_CONF) &= ~LPCON_LP_TIMER_EN;
+    tiku_esp32c61_mie_restore(m);
+    modem_set(modem_mods & (uint8_t)~MOD_BT);
+}
+
+uint32_t espw_modem_bt_lp_hz(void) {
+    return 40000000UL / BT_LP_DIV;
+}
+
 /*---------------------------------------------------------------------------*/
 /* The PHY                                                                   */
 /*---------------------------------------------------------------------------*/
@@ -198,7 +272,8 @@ static void phy_track(void *arg) {
     (void)arg;
     (void)espw_osi_funcs._mutex_lock(phy_lock);
     if (phy_on) {
-        phy_param_track_tot(true, false);
+        phy_param_track_tot((phy_modems & PHY_WIFI) != 0U,
+                            (phy_modems & PHY_BT) != 0U);
     }
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
@@ -224,8 +299,9 @@ static void phy_calibrate(void) {
     phy_cal_fresh = 1U;
 }
 
-void espw_phy_enable(void) {
-    (void)espw_osi_funcs._mutex_lock(phy_lock);
+/** @brief The PHY on for @p modem: powered and calibrated (or woken) by the
+ *         first radio, tracked for every one; the lock held. */
+static void phy_modem_on(uint8_t modem) {
     if (!phy_on) {
         modem_set(modem_mods | MOD_PHY | MOD_PHY_CAL);
         if ((TIKU_REG32(SYSCON_CLK_CONF1) & CLK_PHY_REQUIRED) !=
@@ -243,8 +319,28 @@ void espw_phy_enable(void) {
         espw_timer_arm_us(phy_track_timer, 1000000U, true);
         modem_set(modem_mods & (uint8_t)~MOD_PHY_CAL);
         phy_on = 1U;
-        phy_param_track_tot(true, false);
     }
+    phy_modems |= modem;
+    phy_param_track_tot((phy_modems & PHY_WIFI) != 0U,
+                        (phy_modems & PHY_BT) != 0U);
+}
+
+/** @brief The PHY off for @p modem, and powered down with the last. */
+static void phy_modem_off(uint8_t modem) {
+    phy_modems &= (uint8_t)~modem;
+    if (phy_on && phy_modems == 0U) {
+        phy_on = 0U;
+        espw_timer_disarm(phy_track_timer);
+        phy_close_rf();
+        phy_xpd_tsens();
+        phy_wait_freq_hw_hop_done();
+        modem_set(modem_mods & (uint8_t)~MOD_PHY);
+    }
+}
+
+void espw_phy_enable(void) {
+    (void)espw_osi_funcs._mutex_lock(phy_lock);
+    phy_modem_on(PHY_WIFI);
     phy_wifi_enable_set(1U);
     /* IDF's setting: the baseband's idle check off, as RX can panic. */
     set_bb_wdg(true, false, 0x18U, 0xAAU, false, false, false);
@@ -254,14 +350,19 @@ void espw_phy_enable(void) {
 void espw_phy_disable(void) {
     (void)espw_osi_funcs._mutex_lock(phy_lock);
     phy_wifi_enable_set(0U);
-    if (phy_on) {
-        phy_on = 0U;
-        espw_timer_disarm(phy_track_timer);
-        phy_close_rf();
-        phy_xpd_tsens();
-        phy_wait_freq_hw_hop_done();
-        modem_set(modem_mods & (uint8_t)~MOD_PHY);
-    }
+    phy_modem_off(PHY_WIFI);
+    (void)espw_osi_funcs._mutex_unlock(phy_lock);
+}
+
+void espw_phy_bt_enable(void) {
+    (void)espw_osi_funcs._mutex_lock(phy_lock);
+    phy_modem_on(PHY_BT);
+    (void)espw_osi_funcs._mutex_unlock(phy_lock);
+}
+
+void espw_phy_bt_disable(void) {
+    (void)espw_osi_funcs._mutex_lock(phy_lock);
+    phy_modem_off(PHY_BT);
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
 
@@ -291,9 +392,12 @@ int espw_read_mac(uint8_t *mac, unsigned int type) {
     }
     (void)tiku_cpu_esp32c61_unique_id(mac, 6U);
     /* The station has the factory address; the soft-AP its locally
-     * administered twin. */
+     * administered twin; Bluetooth the third of the four universal ones
+     * the factory assigns (last byte + 2, as IDF counts them). */
     if (type == ESP_MAC_WIFI_SOFTAP) {
         mac[0] |= 0x02U;
+    } else if (type == ESP_MAC_BT) {
+        mac[5] = (uint8_t)(mac[5] + 2U);
     }
     return ESP_OK;
 }

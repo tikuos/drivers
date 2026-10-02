@@ -1,8 +1,9 @@
-# ESP32-C61 Wi-Fi (Espressif radio libraries)
+# ESP32-C61 Wi-Fi and BLE (Espressif radio libraries)
 
-Wi-Fi for tikuOS on the ESP32-C61 through an OS shim over Espressif's
-binary radio libraries -- the approach NuttX and Zephyr take. The design
-note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
+Wi-Fi and Bluetooth LE for tikuOS on the ESP32-C61 through an OS shim over
+Espressif's binary radio libraries -- the approach NuttX and Zephyr take.
+The design notes, milestones and decisions live in
+`kintsugi/esp32c61-radio-plan.md` and `kintsugi/esp32c61-ble-plan.md`.
 
 ## Status
 
@@ -14,7 +15,7 @@ note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS builds and runs to the network with code in flash and buffers in PSRAM -- live sites wait on an open network |
 | R5 | Radio off: sleep numbers unchanged | pending |
-| R6 | BLE | later |
+| R6 | BLE: the LE controller under tikuOS's own host stack | in part: `bt on` brings the controller up (HCI Reset, version, address through the host), `bt scan` finds the advertisers around the bench, `bt advertise` runs; connections next, then Wi-Fi and BLE together |
 
 ## Fetching the libraries
 
@@ -29,7 +30,8 @@ sh drivers/wifi/esp/fetch.sh
 | File | From | Licence |
 |------|------|---------|
 | libnet80211.a, libpp.a, libcore.a | espressif/esp32-wifi-lib @ af55a0c, esp32c61/ | Apache-2.0 |
-| libphy.a | espressif/esp-phy-lib @ 20f1db0, esp32c61/ | Apache-2.0 |
+| libphy.a, libbtbb.a | espressif/esp-phy-lib @ 20f1db0, esp32c61/ | Apache-2.0 |
+| libble_app.a | espressif/esp32c6-bt-lib @ a00f2d0, esp32c61/ | Apache-2.0 |
 | esp32c61.rom{,.api,.coexist,.net80211,.pp,.phy,.version}.ld | espressif/esp-idf @ 4d59230, components/esp_rom/esp32c61/ld | Apache-2.0 |
 
 The ROM scripts only name addresses in the chip's ROM, where much of the
@@ -38,12 +40,16 @@ missing.
 
 ## Build and flash
 
-The radio's tasks run as worker threads, so the build needs them:
+The radios' tasks run as worker threads, so the build needs them.  Wi-Fi:
 
 ```
 make MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
 make flash MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
 ```
+
+BLE, with `TIKU_DRV_BLE_ESP_ENABLE=1` in place of (or beside) the Wi-Fi
+flag.  Both together need `TIKU_ESP32C61_XIP_CODE=1` to fit SRAM, and run
+one at a time until coexistence lands.
 
 For IP over the radio add the lean net stack (TikuBench's wifi firmware for
 this board builds the same):
@@ -149,10 +155,51 @@ once, when nothing listens.
 Bring-up tracing (every blocking wait, task and interrupt route) is
 compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
 
+## BLE
+
+Espressif's LE controller carries tikuOS's own host stack
+(`tikukits/net/bluetooth`, the one the Pico 2 W's CYW43 uses) over its
+in-memory HCI:
+
+```
+tikuOS:/> bt on
+[esp-ble] up: address 30:ed:a0:e7:ee:d6, NPL 66/1/18/0/0
+[bt] p6.D: HCI_Reset OK (status=0x00)
+[bt] p6.D: Read_Local_Version hci=14 lmp=14 mfr=0x02e5 sub=0x0000
+tikuOS:/> bt scan
+tikuOS:/> bt list
+tikuOS:/> bt advertise TikuC61
+tikuOS:/> bt off
+[esp-ble] down: the heap peaked at 40912 bytes, 0 packets dropped
+```
+
+`bt on` takes 64 KB from the SRAM tier for the controller's heap (37 KB
+in use at rest, 41 KB scanning), registers what the controller calls --
+`esp_npl.c`, its OS (events, queues, callouts, locks) over kernel wait
+queues and the shim's timer service, and `esp_mempool.c`, the memory pools
+it imports -- clocks the BLE MAC, and initialises and enables the
+controller in the order IDF does.  The controller's code runs from flash,
+as IDF's run-in-flash-only mode places it, with that mode's relaxed timing;
+only its 2 KB of hot paths and its data stay in SRAM.  The address is the
+factory MAC's third universal one (last byte + 2).  `bt off` stops it all
+and gives the heap back.
+
+Its task is a worker thread, and the kernel thread runs first: the driver
+waits for the controller's first HCI NOP before the host starts, and lets
+its task finish before each command (it frees a command's buffer only
+after the reply).  `bt status` shows the heap and the radio's interrupts.
+`EXTRA_CFLAGS=-DESPB_TRACE=1` traces every HCI command, event and receive.
+
 ## Files
 
 - `tiku_drv_wifi_esp.c/.h` -- the driver descriptor, the XIP check, the
   radio's on/off, joining, the frame path and the `tiku_wireless` interface
+- `esp_ble.c`, `tiku_drv_ble_esp.h` -- BLE: the controller's on/off, the
+  tables it calls, its configuration, the host's transport
+- `esp_npl.c`, `esp_mempool.c`, `esp_ble.h` -- the controller's OS layer
+  and memory pools
+- `esp_ble_abi.h` -- the controller library's ABI, hand-written
+- `esp_core.c` -- what both radios stand on: heap, modem gating, timers
 - `esp_osi.c` -- the OS the libraries run on: locks and queues over kernel
   wait queues, tasks as worker threads, timers on SYSTIMER's driver alarm,
   their interrupt lines on the radio's CLIC lines
@@ -165,5 +212,6 @@ compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
 - `esp_port.h` -- what those files share
 - `esp_abi.h` -- the libraries' ABI this driver uses, hand-written
 - `esp_glue.c` -- the symbols the libraries expect around them
-- `esp_xip.ld` -- the fragment placing the libraries in the XIP window
+- `esp_xip.ld`, `esp_wifi_xip.ld`, `esp_ble_xip.ld` -- the fragments
+  placing the libraries in the XIP window
 - `fetch.sh`, `SHA256SUMS` -- download and verification

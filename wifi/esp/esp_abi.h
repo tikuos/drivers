@@ -290,9 +290,10 @@ _Static_assert(offsetof(wifi_init_config_t, wifi_task_stack_size) == 152,
 _Static_assert(offsetof(wifi_init_config_t, magic) == 156, "init");
 #endif
 
-/** @brief _read_mac()'s kinds; the driver answers the first two. */
+/** @brief _read_mac()'s kinds the driver answers. */
 #define ESP_MAC_WIFI_STA            0U
 #define ESP_MAC_WIFI_SOFTAP         1U
+#define ESP_MAC_BT                  2U
 
 /** @brief The PHY's 128 bytes of defaults, and what calibration keeps. */
 typedef struct {

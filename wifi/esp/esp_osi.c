@@ -81,13 +81,9 @@ static void trace_workers(void) {
 /* Waiting                                                                   */
 /*---------------------------------------------------------------------------*/
 
-/** @brief A wait's end, set once so a woken waiter does not start over. */
-typedef struct {
-    uint8_t           forever;
-    tiku_clock_time_t until;
-} osi_deadline_t;
+static void osi_wait_mark(tiku_waitq_t *q);
 
-static void dl_start(osi_deadline_t *d, uint32_t ms) {
+void espw_deadline_start(espw_deadline_t *d, uint32_t ms) {
     unsigned long t = (unsigned long)(((uint64_t)ms * TIKU_CLOCK_SECOND +
                                        999U) / 1000U);
 
@@ -95,13 +91,9 @@ static void dl_start(osi_deadline_t *d, uint32_t ms) {
     d->until = (tiku_clock_time_t)(tiku_clock_time() + (t != 0UL ? t : 1UL));
 }
 
-/**
- * @brief Block on @p q once, inside one atomic section; the caller tests its
- *        condition again after.  @return 0 once nothing more may be waited:
- *        a zero timeout, an interrupt handler, or the deadline gone by
- */
-static int dl_wait(tiku_waitq_t *q, osi_deadline_t *d, uint32_t ms) {
+int espw_deadline_wait(tiku_waitq_t *q, espw_deadline_t *d, uint32_t ms) {
     tiku_clock_time_t now;
+    int woke;
 
     if (ms == 0U || tiku_esp32c61_in_isr()) {
         return 0;
@@ -110,21 +102,26 @@ static int dl_wait(tiku_waitq_t *q, osi_deadline_t *d, uint32_t ms) {
           d->forever ? -1L : (long)ms);
     trace_workers();
     if (d->forever) {
+        osi_wait_mark(q);
         (void)tiku_thread_wait(q, 0UL);
+        osi_wait_mark(NULL);
         return 1;
     }
     now = tiku_clock_time();
     if (!TIKU_CLOCK_LT(now, d->until)) {
         return 0;
     }
-    return tiku_thread_wait(q, (unsigned long)(tiku_clock_time_t)
+    osi_wait_mark(q);
+    woke = tiku_thread_wait(q, (unsigned long)(tiku_clock_time_t)
                                 (d->until - now));
+    osi_wait_mark(NULL);
+    return woke;
 }
 
 /** @brief Who is asking: a worker, or a stand-in for the kernel thread. */
 static uint8_t osi_kernel_self;
 
-static void *osi_self(void) {
+void *espw_self(void) {
     tiku_thread_t *t = tiku_thread_self();
 
     return t != NULL ? (void *)t : (void *)&osi_kernel_self;
@@ -156,10 +153,10 @@ static void osi_semphr_delete(void *h) {
 
 static int32_t osi_semphr_take(void *h, uint32_t ms) {
     osi_sem_t *s = h;
-    osi_deadline_t d;
+    espw_deadline_t d;
     int32_t got = 0;
 
-    dl_start(&d, ms);
+    espw_deadline_start(&d, ms);
     tiku_atomic_enter();
     for (;;) {
         if (s->count > 0U) {
@@ -167,7 +164,7 @@ static int32_t osi_semphr_take(void *h, uint32_t ms) {
             got = 1;
             break;
         }
-        if (!dl_wait(&s->wq, &d, ms)) {
+        if (!espw_deadline_wait(&s->wq, &d, ms)) {
             break;
         }
     }
@@ -224,12 +221,14 @@ static void osi_mutex_delete(void *h) {
 /* Both kinds nest, as IDF's adapter takes them recursively either way. */
 static int32_t osi_mutex_lock(void *h) {
     osi_mutex_t *m = h;
-    void *me = osi_self();
+    void *me = espw_self();
 
     tiku_atomic_enter();
     while (m->depth != 0U && m->owner != me) {
         TRACE("wait: %s on mutex 0x%08lx\n", who(), (unsigned long)(uintptr_t)m);
+        osi_wait_mark(&m->wq);
         (void)tiku_thread_wait(&m->wq, 0UL);
+        osi_wait_mark(NULL);
     }
     m->owner = me;
     m->depth++;
@@ -242,7 +241,7 @@ static int32_t osi_mutex_unlock(void *h) {
     int32_t ok = 0;
 
     tiku_atomic_enter();
-    if (m->depth != 0U && m->owner == osi_self()) {
+    if (m->depth != 0U && m->owner == espw_self()) {
         if (--m->depth == 0U) {
             m->owner = NULL;
             tiku_thread_wake_one(&m->wq);
@@ -305,10 +304,10 @@ static void queue_put(osi_queue_t *q, const void *item, int front) {
 
 static int32_t queue_send(void *h, void *item, uint32_t ms, int front) {
     osi_queue_t *q = h;
-    osi_deadline_t d;
+    espw_deadline_t d;
     int32_t ok = 0;
 
-    dl_start(&d, ms);
+    espw_deadline_start(&d, ms);
     tiku_atomic_enter();
     for (;;) {
         if (q->count < q->len) {
@@ -316,7 +315,7 @@ static int32_t queue_send(void *h, void *item, uint32_t ms, int front) {
             ok = 1;
             break;
         }
-        if (!dl_wait(&q->tx_wq, &d, ms)) {
+        if (!espw_deadline_wait(&q->tx_wq, &d, ms)) {
             break;
         }
     }
@@ -355,10 +354,10 @@ static int32_t osi_queue_send_from_isr(void *h, void *item, void *hptw) {
 
 static int32_t osi_queue_recv(void *h, void *item, uint32_t ms) {
     osi_queue_t *q = h;
-    osi_deadline_t d;
+    espw_deadline_t d;
     int32_t ok = 0;
 
-    dl_start(&d, ms);
+    espw_deadline_start(&d, ms);
     tiku_atomic_enter();
     for (;;) {
         if (q->count > 0U) {
@@ -369,7 +368,7 @@ static int32_t osi_queue_recv(void *h, void *item, uint32_t ms) {
             ok = 1;
             break;
         }
-        if (!dl_wait(&q->rx_wq, &d, ms)) {
+        if (!espw_deadline_wait(&q->rx_wq, &d, ms)) {
             break;
         }
     }
@@ -442,10 +441,10 @@ static uint32_t osi_event_group_clear_bits(void *h, uint32_t bits) {
 static uint32_t osi_event_group_wait_bits(void *h, uint32_t want, int clear,
                                           int all, uint32_t ms) {
     osi_events_t *e = h;
-    osi_deadline_t d;
+    espw_deadline_t d;
     uint32_t seen;
 
-    dl_start(&d, ms);
+    espw_deadline_start(&d, ms);
     tiku_atomic_enter();
     for (;;) {
         seen = e->bits;
@@ -455,7 +454,7 @@ static uint32_t osi_event_group_wait_bits(void *h, uint32_t want, int clear,
             }
             break;
         }
-        if (!dl_wait(&e->wq, &d, ms)) {
+        if (!espw_deadline_wait(&e->wq, &d, ms)) {
             seen = e->bits;
             break;
         }
@@ -469,9 +468,12 @@ static uint32_t osi_event_group_wait_bits(void *h, uint32_t want, int clear,
 /*---------------------------------------------------------------------------*/
 
 typedef struct {
-    tiku_thread_t  thread;
-    void         (*fn)(void *);
-    void          *arg;
+    tiku_thread_t          thread;
+    void                 (*fn)(void *);
+    void                  *arg;
+    tiku_waitq_t *volatile wq;          /* what it blocks on, if anything */
+    volatile uint8_t       killed;      /* deleted by another: ends at its
+                                           next wait */
 } osi_task_t;
 
 /* Every task made here, so the radio going down can see each one finish
@@ -489,6 +491,36 @@ static void osi_task_reap(void) {
             espw_free(t);
         }
     }
+}
+
+/** @brief The running worker's task, if it is one made here. */
+static osi_task_t *osi_task_self(void) {
+    tiku_thread_t *self = tiku_thread_self();
+
+    for (unsigned i = 0U; self != NULL && i < TIKU_THREADS_MAX; i++) {
+        if (osi_tasks[i] != NULL && &osi_tasks[i]->thread == self) {
+            return osi_tasks[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * @brief Note what the running task blocks on (NULL once woken).  A task
+ *        another deleted ends here, before or after its wait, leaving the
+ *        one atomic section every wait is made in.
+ */
+static void osi_wait_mark(tiku_waitq_t *q) {
+    osi_task_t *me = osi_task_self();
+
+    if (me == NULL) {
+        return;
+    }
+    if (me->killed) {
+        tiku_atomic_exit();
+        tiku_thread_exit();
+    }
+    me->wq = q;
 }
 
 static void osi_task_entry(void *arg) {
@@ -559,12 +591,25 @@ static void osi_task_delete(void *handle) {
         }
         return;
     }
-    ESPW_PRINTF("task delete of another task: not supported\n");
+    /* Another task: it cannot be stopped where it stands, so it ends at its
+     * next wait -- woken now if it is in one. */
+    tiku_atomic_enter();
+    for (unsigned i = 0U; i < TIKU_THREADS_MAX; i++) {
+        osi_task_t *t = osi_tasks[i];
+
+        if (t == handle) {
+            t->killed = 1U;
+            if (t->wq != NULL) {
+                tiku_thread_wake_all(t->wq);
+            }
+        }
+    }
+    tiku_atomic_exit();
 }
 
-static void osi_task_delay(uint32_t ms) {
+void espw_delay_ms(uint32_t ms) {
     tiku_waitq_t nobody = { 0U };
-    osi_deadline_t d;
+    espw_deadline_t d;
 
     if (ms == 0U) {
         if (tiku_thread_self() != NULL) {
@@ -572,9 +617,9 @@ static void osi_task_delay(uint32_t ms) {
         }
         return;
     }
-    dl_start(&d, ms);
+    espw_deadline_start(&d, ms);
     tiku_atomic_enter();
-    while (dl_wait(&nobody, &d, ms)) {
+    while (espw_deadline_wait(&nobody, &d, ms)) {
     }
     tiku_atomic_exit();
 }
@@ -584,7 +629,7 @@ static int32_t osi_task_ms_to_tick(uint32_t ms) {
 }
 
 static void *osi_task_get_current_task(void) {
-    return osi_self();
+    return espw_self();
 }
 
 static int32_t osi_task_get_max_priority(void) {
@@ -951,6 +996,16 @@ static void osi_log_write(unsigned int level, const char *tag,
     va_end(ap);
 }
 
+/* The Wi-Fi driver takes the stack's events; a build without it has none
+ * to take (BLE alone uses this table only for its interrupts and tasks). */
+__attribute__((weak)) void espw_event(const char *base, int32_t id,
+                                      const void *data, size_t len) {
+    (void)base;
+    (void)id;
+    (void)data;
+    (void)len;
+}
+
 static int32_t osi_event_post(const char *base, int32_t id, void *data,
                               size_t len, uint32_t ms) {
     (void)ms;
@@ -1180,7 +1235,7 @@ wifi_osi_funcs_t espw_osi_funcs = {
     ._task_create_pinned_to_core = osi_task_create_pinned,
     ._task_create = osi_task_create,
     ._task_delete = osi_task_delete,
-    ._task_delay = osi_task_delay,
+    ._task_delay = espw_delay_ms,
     ._task_ms_to_tick = osi_task_ms_to_tick,
     ._task_get_current_task = osi_task_get_current_task,
     ._task_get_max_priority = osi_task_get_max_priority,
@@ -1322,7 +1377,7 @@ int espw_osi_stop(void) {
         if (left == 0) {
             break;
         }
-        osi_task_delay(10U);
+        espw_delay_ms(10U);
     }
     for (unsigned i = 0U; i < TIKU_THREADS_MAX; i++) {
         if (osi_tasks[i] != NULL) {

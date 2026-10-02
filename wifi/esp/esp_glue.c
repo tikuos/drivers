@@ -3,7 +3,8 @@
  *
  * The symbols left undefined once the libraries meet the ROM's scripts:
  * IDF's print hooks, tables and small helpers, and data the ECO4 ROM keeps
- * itself.  Mesh, ESP-NOW and FTM are not used, so theirs are inert.
+ * itself.  Mesh, ESP-NOW and FTM are not used, so theirs are inert.  Shared
+ * by both radios; what one does not use the link drops.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -60,7 +61,17 @@ int phy_printf(const char *fmt, ...) {
 }
 
 /* Their stdio: straight to the console, not newlib's, whose files go
- * nowhere here. */
+ * nowhere here (the BLE controller reports its errors with printf). */
+int printf(const char *fmt, ...) {
+    va_list ap;
+    int n;
+
+    va_start(ap, fmt);
+    n = esp_vlog(fmt, ap);
+    va_end(ap);
+    return n;
+}
+
 int putchar(int c) {
     TIKU_PRINTF("%c", c);
     return c;
