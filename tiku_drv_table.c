@@ -30,6 +30,10 @@
 extern const tiku_drv_t tiku_drv_wifi_cyw43;
 #endif
 
+#if TIKU_DRV_WIFI_ESP_ENABLE
+extern const tiku_drv_t tiku_drv_wifi_esp;
+#endif
+
 #if TIKU_DRV_SENSOR_TEMPERATURE_MCP9808_ENABLE
 extern const tiku_drv_t tiku_drv_sensor_temperature_mcp9808;
 #endif
@@ -45,6 +49,10 @@ extern const tiku_drv_t tiku_drv_sensor_temperature_mcp9808;
 const tiku_drv_t *const tiku_drv_table[] = {
 #if TIKU_DRV_WIFI_CYW43_ENABLE
     &tiku_drv_wifi_cyw43,
+#endif
+
+#if TIKU_DRV_WIFI_ESP_ENABLE
+    &tiku_drv_wifi_esp,
 #endif
 
 #if TIKU_DRV_SENSOR_TEMPERATURE_MCP9808_ENABLE
