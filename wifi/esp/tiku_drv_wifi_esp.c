@@ -15,12 +15,17 @@
 
 #include <interfaces/wireless/tiku_wireless.h>
 #include <kernel/memory/tiku_mem.h>
+#include <kernel/process/tiku_process.h>
+#include <kernel/timers/tiku_clock.h>
 #include <arch/esp32c61/tiku_sleep_arch.h>
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
 #include "esp_port.h"
 
 #define ESPW_XIP_MAGIC   0x31504958UL           /* "XIP1" */
+
+/* The runner's own event: the stack has finished a scan (from its task). */
+#define ESPW_EV_SCAN_DONE (TIKU_EVENT_USER + 0x20U)
 
 /* The libraries' heap, taken from the SRAM tier while the radio is up. */
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
@@ -57,6 +62,16 @@ static uint8_t      espw_heap_taken;
 static uint8_t      espw_mac[6];
 static tiku_arena_t espw_heap_arena;
 
+/* The last scan: what it found, how long it took, whether one runs. */
+static tiku_wireless_ap_t espw_aps[TIKU_WIRELESS_MAX_SCAN_RESULTS];
+static uint8_t           espw_ap_count;
+static uint16_t          espw_scan_found;
+static volatile uint8_t  espw_scanning;
+static tiku_clock_time_t espw_scan_start;
+static uint32_t          espw_scan_ticks;
+
+TIKU_PROCESS(espw_runner, "wifi-esp");
+
 int tiku_drv_wifi_esp_xip_ok(void) {
     /* Through a volatile view: the compiler knows the initializer, but the
      * flash may hold an older build's bytes. */
@@ -80,6 +95,13 @@ void espw_event(const char *base, int32_t id, const void *data, size_t len) {
         return;
     }
     switch (id) {
+    case WIFI_EVENT_SCAN_DONE:
+        /* Collected by the runner: fetching the records waits on this
+         * very task, so it cannot happen here. */
+        (void)tiku_process_post(&espw_runner, ESPW_EV_SCAN_DONE,
+            (tiku_event_data_t)(uintptr_t)(data != NULL ?
+                ((const wifi_event_sta_scan_done_t *)data)->status : 1U));
+        break;
     case WIFI_EVENT_STA_START:
         ESPW_PRINTF("station started\n");
         break;
@@ -89,6 +111,83 @@ void espw_event(const char *base, int32_t id, const void *data, size_t len) {
     default:
         break;
     }
+}
+
+/*---------------------------------------------------------------------------*/
+/* Scanning                                                                  */
+/*---------------------------------------------------------------------------*/
+
+/** @brief Every channel the country allows, actively, with default dwell. */
+static void espw_scan_begin(void) {
+    esp_err_t rc;
+
+    if (!espw_up || espw_scanning) {
+        return;
+    }
+    espw_scanning = 1U;
+    espw_scan_start = tiku_clock_time();
+    rc = esp_wifi_scan_start(NULL, false);
+    if (rc != ESP_OK) {
+        espw_scanning = 0U;
+        ESPW_PRINTF("scan: 0x%lx\n", (unsigned long)rc);
+    }
+}
+
+/** @brief The scan has ended: take its records into the table, then tell
+ *         whoever listens, one AP_FOUND each and a SCAN_COMPLETE. */
+static void espw_scan_collect(uint32_t status) {
+    uint16_t n = TIKU_WIRELESS_MAX_SCAN_RESULTS, total = 0U;
+    wifi_ap_record_t *recs = espw_malloc(n * sizeof *recs);
+
+    espw_ap_count = 0U;
+    (void)esp_wifi_scan_get_ap_num(&total);
+    if (recs == NULL || status != 0U ||
+        esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) {
+        n = 0U;
+        (void)esp_wifi_clear_ap_list();
+    }
+    for (uint16_t i = 0U; i < n; i++) {
+        tiku_wireless_ap_t *ap = &espw_aps[espw_ap_count++];
+        size_t len = strnlen((const char *)recs[i].ssid, 32U);
+
+        memset(ap, 0, sizeof *ap);
+        memcpy(ap->bssid, recs[i].bssid, sizeof ap->bssid);
+        memcpy(ap->ssid, recs[i].ssid, len);
+        ap->ssid_len = (uint8_t)len;
+        ap->rssi = recs[i].rssi;
+        ap->channel = recs[i].primary;
+    }
+    espw_free(recs);
+    espw_scan_found = total;
+    espw_scan_ticks = (uint32_t)(tiku_clock_time_t)(tiku_clock_time() -
+                                                    espw_scan_start);
+    espw_scanning = 0U;
+    ESPW_PRINTF("*** scan done -- %u AP%s in %lu ms ***\n", (unsigned)total,
+                total == 1U ? "" : "s",
+                (unsigned long)(espw_scan_ticks * 1000UL / TIKU_CLOCK_SECOND));
+    for (uint8_t i = 0U; i < espw_ap_count; i++) {
+        (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                TIKU_WIRELESS_EVT_AP_FOUND, &espw_aps[i]);
+    }
+    (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                            TIKU_WIRELESS_EVT_SCAN_COMPLETE,
+                            (tiku_event_data_t)(uintptr_t)espw_ap_count);
+}
+
+/** @brief The runner: starts what the interface asked for, in the kernel
+ *         thread, and collects what the stack finished. */
+TIKU_PROCESS_THREAD(espw_runner, ev, data)
+{
+    TIKU_PROCESS_BEGIN();
+    for (;;) {
+        TIKU_PROCESS_WAIT_EVENT();
+        if (ev == TIKU_WIRELESS_EVT_SCAN_START) {
+            espw_scan_begin();
+        } else if (ev == ESPW_EV_SCAN_DONE && espw_scanning) {
+            espw_scan_collect((uint32_t)(uintptr_t)data);
+        }
+    }
+    TIKU_PROCESS_END();
 }
 
 /*---------------------------------------------------------------------------*/
@@ -125,6 +224,7 @@ static void espw_teardown(int stage) {
     int ended = 1;
 
     if (stage >= 3) {
+        espw_wpa_unregister();
         (void)esp_wifi_deinit_internal();
         espw_modem_wifi_inited(0);
         espw_modem_wifi_clock_off();
@@ -178,7 +278,10 @@ static int espw_power_up(void) {
     }
     espw_modem_wifi_inited(1);
     (void)esp_wifi_internal_set_log_level(2);   /* warnings and errors */
-    rc = esp_wifi_set_mode(WIFI_MODE_STA);
+    rc = espw_wpa_register() == 0 ? ESP_OK : ESP_ERR_NO_MEM;
+    if (rc == ESP_OK) {
+        rc = esp_wifi_set_mode(WIFI_MODE_STA);
+    }
     if (rc == ESP_OK) {
         rc = esp_wifi_start();
     }
@@ -213,6 +316,7 @@ static int espw_power_down(void) {
         ESPW_PRINTF("stop: 0x%lx\n", (unsigned long)rc);
     }
     espw_up = 0U;
+    espw_scanning = 0U;
     tiku_esp32c61_sleep_hold(0);
     espw_teardown(3);
     ESPW_PRINTF("down\n");
@@ -242,20 +346,34 @@ int tiku_wireless_status(tiku_wireless_status_t *out) {
     memcpy(out->mac, espw_mac, sizeof out->mac);
     out->irq_count = espw_irq_count();
     out->link_state = TIKU_WIRELESS_LINK_IDLE;
+    out->scan_in_progress = espw_scanning;
+    out->scan_aps_found = espw_scan_found;
+    out->last_scan_ticks = espw_scan_ticks;
     return TIKU_DRV_OK;
 }
 
-/* Scanning and joining arrive with the next steps; until then, refused. */
 int tiku_wireless_scan_start(void) {
-    return TIKU_DRV_ERR_INVALID;
+    if (!espw_up) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    if (espw_scanning) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+    return tiku_process_post(&espw_runner, TIKU_WIRELESS_EVT_SCAN_START,
+                             NULL) ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
 }
 
 uint8_t tiku_wireless_scan_results(tiku_wireless_ap_t *out,
                                    uint8_t max_results) {
-    (void)out;
-    (void)max_results;
-    return 0U;
+    uint8_t n = espw_ap_count < max_results ? espw_ap_count : max_results;
+
+    if (out != NULL && n != 0U) {
+        memcpy(out, espw_aps, n * sizeof *out);
+    }
+    return out != NULL ? n : 0U;
 }
+
+/* Joining arrives with the supplicant; until then, refused. */
 
 int tiku_wireless_connect_auth(const char *ssid, const char *psk,
                                tiku_wireless_auth_t auth) {
@@ -292,6 +410,7 @@ static int espw_init(void) {
     ESPW_PRINTF("libraries run from flash: phy %s, net80211 %s, pp %s\n",
                 get_phy_version_str(), libnet80211_reversion_git,
                 libpp_reversion_git);
+    (void)tiku_process_register("wifi-esp", &espw_runner);
     espw_ready = 1U;
     return TIKU_DRV_OK;
 }

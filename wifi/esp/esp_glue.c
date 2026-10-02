@@ -125,9 +125,28 @@ int mesh_sta_auth_expire_time(void) {
     return 0;
 }
 
-/* Regulatory domains: filled when scanning needs them. */
-uint8_t regdomain_table[256];
-uint8_t regulatory_data[1024];
+/* The countries the stack may be told it is in, and their 2.4 GHz rules:
+ * channels, widest band (2 = 40 MHz, 1 = 20 MHz) and power cap in dBm.
+ * "01" is the world-safe default it starts in. */
+#define RULE(first, last, bw, dbm) { (first), (last), (bw), (dbm), 0, 0 }
+
+const wifi_regulatory_t regulatory_data[] = {
+    { 1, { RULE(1, 11, 2, 20) } },                      /* 0: world */
+    { 1, { RULE(1, 13, 2, 20) } },                      /* 1: Europe, CN */
+    { 1, { RULE(1, 11, 2, 30) } },                      /* 2: US */
+    { 1, { RULE(1, 13, 2, 23) } },                      /* 3: SG */
+    { 2, { RULE(1, 13, 2, 20), RULE(14, 14, 1, 20) } }, /* 4: JP */
+    { 1, { RULE(1, 13, 2, 36) } },                      /* 5: AU */
+    { 1, { RULE(1, 13, 2, 30) } },                      /* 6: IN */
+};
+
+const wifi_regdomain_t regdomain_table[] = {
+    { { '0', '1' }, 0 }, { { 'E', 'U' }, 1 }, { { 'G', 'B' }, 1 },
+    { { 'D', 'E' }, 1 }, { { 'C', 'N' }, 1 }, { { 'U', 'S' }, 2 },
+    { { 'S', 'G' }, 3 }, { { 'J', 'P' }, 4 }, { { 'A', 'U' }, 5 },
+    { { 'I', 'N' }, 6 },
+    { { '#', '#' }, sizeof regulatory_data / sizeof regulatory_data[0] },
+};
 
 /* FTM's per-bandwidth delay compensation, unused without FTM. */
 #define FTM_COMP(name) const int32_t name = 0

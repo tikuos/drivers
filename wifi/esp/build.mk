@@ -32,6 +32,7 @@ SRCS    += $(ESPW_DIR)/tiku_drv_wifi_esp.c
 SRCS    += $(ESPW_DIR)/esp_osi.c
 SRCS    += $(ESPW_DIR)/esp_phy.c
 SRCS    += $(ESPW_DIR)/esp_heap.c
+SRCS    += $(ESPW_DIR)/esp_wpa.c
 SRCS    += $(ESPW_DIR)/esp_glue.c
 CFLAGS  += -DTIKU_DRV_WIFI_ESP_ENABLE=1
 # esp_xip.ld joins the arch script's XIP fragments; the ROM scripts only name

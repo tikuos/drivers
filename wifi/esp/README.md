@@ -10,7 +10,7 @@ note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
 |-----------|-------------|-------|
 | R0 | Libraries link; their code runs from flash (XIP) | done: boot prints the PHY version from flash-resident code |
 | R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | done: `wifi on` calibrates in 66 ms, starts the station, reports the MAC |
-| R2 | Scan through `tiku_wireless` | pending |
+| R2 | Scan through `tiku_wireless` | done: `wifi scan` finds the APs around the bench (30-36 in 2.4 s) |
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | pending |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | pending |
 | R5 | Radio off: sleep numbers unchanged | pending |
@@ -71,7 +71,9 @@ tikuOS:/> wifi on
 [esp-wifi] RF calibrated: 0 in 66 ms
 [esp-wifi] up: MAC 30:ed:a0:e7:ee:d4
 [esp-wifi] heap: 30176 of 57344 bytes in use, 30432 at most
-tikuOS:/> wifi status
+tikuOS:/> wifi scan
+[esp-wifi] *** scan done -- 30 APs in 2445 ms ***
+tikuOS:/> wifi list
 tikuOS:/> wifi off
 ```
 
@@ -82,6 +84,13 @@ the station.  `wifi off` stops it all and gives the heap back once it is
 empty.  The libraries keep a few locks from one start to the next; those
 sit in a small static pool so that the heap can empty.  `wifi status` and
 `/proc/wifi/` show the state, the MAC and the radio's interrupts.
+
+`wifi scan` scans every channel the country allows (the world-safe
+default, 1-11), and `wifi list` shows the 16 strongest of what it found.
+The stack consults a supplicant even to scan, for the RSN and WPA
+elements of each AP: `esp_wpa.c` is tikuOS's own, written from IEEE
+802.11, and joining comes with its handshake.  The country table in
+`esp_glue.c` is a hand-written handful of countries' 2.4 GHz rules.
 
 Bring-up tracing (every blocking wait, task and interrupt route) is
 compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
@@ -96,6 +105,7 @@ compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
 - `esp_phy.c` -- the modem's clocks, the PHY's bring-up and calibration,
   the MAC address
 - `esp_heap.c/.h` -- the libraries' heap and lock pool
+- `esp_wpa.c` -- the supplicant the stack calls: RSN/WPA element parsing
 - `esp_port.h` -- what those files share
 - `esp_abi.h` -- the libraries' ABI this driver uses, hand-written
 - `esp_glue.c` -- the symbols the libraries expect around them

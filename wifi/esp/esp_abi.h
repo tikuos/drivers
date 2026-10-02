@@ -353,6 +353,172 @@ esp_err_t esp_wifi_stop(void);
 esp_err_t esp_wifi_get_mac(wifi_interface_t ifx, uint8_t mac[6]);
 esp_err_t esp_wifi_internal_set_log_level(int level);
 
+/** @brief One access point a scan found: the fields the driver reads, the
+ *         rest (ciphers, PHY modes, country, HE, bandwidth) kept opaque. */
+typedef struct {
+    uint8_t  bssid[6];
+    uint8_t  ssid[33];          /* NUL-terminated */
+    uint8_t  primary;           /* channel */
+    uint32_t second;            /* the secondary channel's side */
+    int8_t   rssi;
+    uint32_t authmode;
+    uint8_t  rest[40];
+} wifi_ap_record_t;
+
+/** @brief WIFI_EVENT_SCAN_DONE's data: 0 on success, and the APs found. */
+typedef struct {
+    uint32_t status;
+    uint8_t  number;
+    uint8_t  scan_id;
+} wifi_event_sta_scan_done_t;
+
+/** @brief A country's rule: a channel range, its widest band (2 = 40 MHz)
+ *         and its power cap in dBm EIRP.  Two rules at most here. */
+typedef struct {
+    uint8_t  start_channel;
+    uint8_t  end_channel;
+    uint16_t max_bandwidth : 3;
+    uint16_t max_eirp : 6;
+    uint16_t is_dfs : 1;
+    uint16_t reserved : 6;
+} wifi_reg_rule_t;
+
+typedef struct {
+    uint8_t         n_reg_rules;
+    wifi_reg_rule_t reg_rules[2];
+} wifi_regulatory_t;
+
+/** @brief A country code and the rules it follows; "##" ends the table. */
+typedef struct {
+    char    cn[2];
+    uint8_t regulatory_type;
+} wifi_regdomain_t;
+
+#if defined(__riscv) && __riscv_xlen == 32
+_Static_assert(sizeof(wifi_ap_record_t) == 92, "AP record size");
+_Static_assert(offsetof(wifi_ap_record_t, ssid) == 6, "ap");
+_Static_assert(offsetof(wifi_ap_record_t, primary) == 39, "ap");
+_Static_assert(offsetof(wifi_ap_record_t, rssi) == 44, "ap");
+_Static_assert(offsetof(wifi_ap_record_t, authmode) == 48, "ap");
+_Static_assert(sizeof(wifi_event_sta_scan_done_t) == 8, "scan done size");
+_Static_assert(sizeof(wifi_reg_rule_t) == 4, "rule size");
+_Static_assert(sizeof(wifi_regulatory_t) == 10, "regulatory size");
+_Static_assert(sizeof(wifi_regdomain_t) == 3, "regdomain size");
+#endif
+
+/** @brief libnet80211: scan every channel the country allows (a NULL
+ *         config: active, default dwell), done with WIFI_EVENT_SCAN_DONE. */
+esp_err_t esp_wifi_scan_start(const void *config, bool block);
+esp_err_t esp_wifi_scan_stop(void);
+esp_err_t esp_wifi_scan_get_ap_num(uint16_t *number);
+
+/** @brief libnet80211: up to @p number records, then the stack's list freed. */
+esp_err_t esp_wifi_scan_get_ap_records(uint16_t *number,
+                                       wifi_ap_record_t *ap_records);
+esp_err_t esp_wifi_clear_ap_list(void);
+
+/* What the supplicant reports of an RSN or WPA element: the protocol, the
+ * key management as its own bits, the ciphers as wifi_cipher_type_t. */
+#define WPA_PROTO_WPA               (1U << 0)
+#define WPA_PROTO_RSN               (1U << 1)
+
+#define WPA_KEY_MGMT_IEEE8021X      (1U << 0)
+#define WPA_KEY_MGMT_PSK            (1U << 1)
+#define WPA_KEY_MGMT_FT_IEEE8021X   (1U << 5)
+#define WPA_KEY_MGMT_FT_PSK         (1U << 6)
+#define WPA_KEY_MGMT_IEEE8021X_SHA256 (1U << 7)
+#define WPA_KEY_MGMT_PSK_SHA256     (1U << 8)
+#define WPA_KEY_MGMT_SAE            (1U << 10)
+#define WPA_KEY_MGMT_FT_SAE         (1U << 11)
+#define WPA_KEY_MGMT_SUITE_B        (1U << 16)
+#define WPA_KEY_MGMT_SUITE_B_192    (1U << 17)
+#define WPA_KEY_MGMT_OWE            (1U << 22)
+#define WPA_KEY_MGMT_FT_IEEE8021X_SHA384 (1U << 24)
+#define WPA_KEY_MGMT_SAE_EXT_KEY    (1U << 26)
+
+typedef enum {
+    WIFI_CIPHER_TYPE_NONE = 0,
+    WIFI_CIPHER_TYPE_WEP40,
+    WIFI_CIPHER_TYPE_WEP104,
+    WIFI_CIPHER_TYPE_TKIP,
+    WIFI_CIPHER_TYPE_CCMP,
+    WIFI_CIPHER_TYPE_TKIP_CCMP,
+    WIFI_CIPHER_TYPE_AES_CMAC128,
+    WIFI_CIPHER_TYPE_SMS4,
+    WIFI_CIPHER_TYPE_GCMP,
+    WIFI_CIPHER_TYPE_GCMP256,
+    WIFI_CIPHER_TYPE_AES_GMAC128,
+    WIFI_CIPHER_TYPE_AES_GMAC256,
+    WIFI_CIPHER_TYPE_UNKNOWN
+} wifi_cipher_type_t;
+
+typedef struct {
+    int            proto;
+    int            pairwise_cipher;
+    int            group_cipher;
+    int            key_mgmt;
+    int            capabilities;
+    size_t         num_pmkid;
+    const uint8_t *pmkid;
+    int            mgmt_group_cipher;
+    uint8_t        rsnxe_capa;
+} wifi_wpa_ie_t;
+
+/** @brief The supplicant as the stack calls it: station, soft-AP, WPA3 and
+ *         OWE hooks; a NULL entry is one this supplicant does not do. */
+typedef struct {
+    bool (*wpa_sta_init)(void);
+    bool (*wpa_sta_deinit)(void);
+    int (*wpa_sta_connect)(uint8_t *bssid);
+    void (*wpa_sta_connected_cb)(uint8_t *bssid);
+    void (*wpa_sta_disconnected_cb)(uint8_t reason_code);
+    int (*wpa_sta_rx_eapol)(uint8_t *src_addr, uint8_t *buf, uint32_t len);
+    bool (*wpa_sta_in_4way_handshake)(void);
+    void *(*wpa_ap_init)(void);
+    bool (*wpa_ap_deinit)(void *data);
+    bool (*wpa_ap_join)(void *join);
+    bool (*wpa_ap_remove)(uint8_t *bssid);
+    uint8_t *(*wpa_ap_get_wpa_ie)(size_t *len);
+    bool (*wpa_ap_rx_eapol)(void *hapd_data, void *sm, uint8_t *data,
+                            size_t data_len);
+    void (*wpa_ap_get_peer_spp_msg)(void *sm, bool *spp_cap, bool *spp_req);
+    char *(*wpa_config_parse_string)(const char *value, size_t *len);
+    int (*wpa_parse_wpa_ie)(const uint8_t *wpa_ie, size_t wpa_ie_len,
+                            wifi_wpa_ie_t *data);
+    int (*wpa_config_bss)(uint8_t *bssid);
+    int (*wpa_michael_mic_failure)(uint16_t is_unicast);
+    uint8_t *(*wpa3_build_sae_msg)(uint8_t *bssid, uint32_t type,
+                                   size_t *len);
+    int (*wpa3_parse_sae_msg)(uint8_t *buf, size_t len, uint32_t type,
+                              uint16_t status);
+    int (*wpa3_hostap_handle_auth)(uint8_t *buf, size_t len, uint32_t type,
+                                   uint16_t status, uint8_t *bssid);
+    int (*wpa_sta_rx_mgmt)(uint8_t type, uint8_t *frame, size_t len,
+                           uint8_t *sender, int8_t rssi, uint8_t channel,
+                           uint64_t current_tsf);
+    void (*wpa_config_done)(void);
+    uint8_t *(*owe_build_dhie)(uint16_t group);
+    int (*owe_process_assoc_resp)(const uint8_t *rsn_ie, size_t rsn_len,
+                                  const uint8_t *dh_ie, size_t dh_len);
+    void (*wpa_sta_clear_curr_pmksa)(void);
+    void (*wpa_config_reload)(void);
+    int (*wpa_parse_wpa_ie_scan_only)(const uint8_t *wpa_ie,
+                                      size_t wpa_ie_len, wifi_wpa_ie_t *data);
+} wpa_funcs_t;
+
+#if defined(__riscv) && __riscv_xlen == 32
+_Static_assert(sizeof(wifi_wpa_ie_t) == 36, "wpa ie data size");
+_Static_assert(offsetof(wifi_wpa_ie_t, pmkid) == 24, "wpa ie");
+_Static_assert(sizeof(wpa_funcs_t) == 112, "supplicant table size");
+_Static_assert(offsetof(wpa_funcs_t, wpa_parse_wpa_ie) == 60, "wpa");
+_Static_assert(offsetof(wpa_funcs_t, wpa_sta_rx_mgmt) == 84, "wpa");
+#endif
+
+/** @brief libnet80211: hand it the supplicant (it frees the table at
+ *         unregister, through the adapter's free). */
+int esp_wifi_register_wpa_cb_internal(wpa_funcs_t *cb);
+int esp_wifi_unregister_wpa_cb_internal(void);
+
 /** @brief The base the stack posts its events under (esp_glue.c). */
 extern const char *WIFI_EVENT;
 

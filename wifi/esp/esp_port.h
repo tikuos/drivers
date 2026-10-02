@@ -70,6 +70,15 @@ int espw_phy_cal_result(uint32_t *us, int *fresh);
 /** @brief A MAC address of @p type (esp_mac_type_t). @return ESP_OK */
 int espw_read_mac(uint8_t *mac, unsigned int type);
 
+/* esp_wpa.c ---------------------------------------------------------------*/
+
+/** @brief Hand the stack its supplicant; it consults one even to scan.
+ *         @return 0, or -1 without memory */
+int espw_wpa_register(void);
+
+/** @brief Take the supplicant back (the stack frees its table). */
+void espw_wpa_unregister(void);
+
 /* tiku_drv_wifi_esp.c -----------------------------------------------------*/
 
 /** @brief An event the libraries posted. */
