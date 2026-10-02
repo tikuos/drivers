@@ -12,7 +12,7 @@ note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
 | R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | done: `wifi on` calibrates in 66 ms, starts the station, reports the MAC |
 | R2 | Scan through `tiku_wireless` | done: `wifi scan` finds the APs around the bench (30-36 in 2.4 s) |
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
-| R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | pending |
+| R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS waits on room -- code in flash, buffers in PSRAM |
 | R5 | Radio off: sleep numbers unchanged | pending |
 | R6 | BLE | later |
 
@@ -45,6 +45,14 @@ make MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_ESP_EN
 make flash MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
 ```
 
+For IP over the radio add the lean net stack (TikuBench's wifi firmware for
+this board builds the same):
+
+```
+TIKU_KIT_NET_ENABLE=1 TIKU_KIT_NET_MIN=1 TIKU_KITS_NET_WIFI_ENABLE=1
+TIKU_KITS_NET_DHCP_ENABLE=1 TIKU_KITS_NET_DNS_ENABLE=1
+```
+
 The libraries' code is too large for the 320 KB SRAM the kernel runs from,
 so `esp_xip.ld` places it in the XIP window: flash 1 MB on, read through the
 1:1 map the port already sets. The image splits in two -- `main.bin` at
@@ -58,8 +66,9 @@ of calling into it:
 ```
 
 The SRAM image is 221 KB (the libraries' `.iram1` code and data, the
-supplicant and its crypto included) and `xip.bin` 381 KB.  BIG BASIC and
-the radio do not fit SRAM together yet.
+supplicant and its crypto included), 236 KB with the IP stack, and
+`xip.bin` 381 KB.  BIG BASIC and the radio do not fit SRAM together yet,
+nor TLS: HTTPS here needs code in flash and big buffers in PSRAM first.
 
 ## Using it
 
@@ -70,18 +79,30 @@ tikuOS:/> wifi on
 [esp-wifi] station started
 [esp-wifi] RF calibrated: 0 in 66 ms
 [esp-wifi] up: MAC 30:ed:a0:e7:ee:d4
-[esp-wifi] heap: 30176 of 57344 bytes in use, 30432 at most
+[esp-wifi] heap: 30296 of 49152 bytes in use, 30552 at most
 tikuOS:/> wifi scan
 [esp-wifi] *** scan done -- 30 APs in 2445 ms ***
 tikuOS:/> wifi list
 tikuOS:/> wifi connect "MyNetwork" mypassphrase
 [esp-wifi] *** LINK UP -- joined MyNetwork (channel 9) in 2507 ms ***
+tikuOS:/> wifi up
+tikuOS:/> ip
+IPv4: 172.25.114.161
+Mask: 255.255.254.0
+Gateway: 172.25.114.1
+DNS: 172.19.215.140
+Lease: 900 s
+reachable now -- on WiFi
+tikuOS:/> ping 172.25.114.1
 tikuOS:/> wifi disconnect
 [esp-wifi] *** LINK DOWN -- left MyNetwork ***
 tikuOS:/> wifi off
+[esp-wifi] down: the heap peaked at 32600 of 49152 bytes, 0 refused
 ```
 
-`wifi on` takes 56 KB from the SRAM tier for the libraries' heap, starts a
+`wifi on` takes 48 KB from the SRAM tier for the libraries' heap (30 KB in
+use at rest, 36 KB at most measured joined with IP traffic; `wifi off` says
+how high it went), starts a
 timer thread and the libraries' own task (two worker slots), calibrates the
 RF the first time (later starts wake the PHY from what it kept), and starts
 the station.  `wifi off` stops it all and gives the heap back once it is
@@ -113,13 +134,21 @@ against a scripted AP on the host (`make -C TikuBench/tests/host/nonkernel
 wpa`), the expected keys computed apart from it.  `esp_crypto.c` gives the
 libraries the crypto they call themselves; the PMF entries refuse.
 
+`wifi up` puts the IP stack on the radio and asks for a DHCP lease; `ip`
+then shows the address, mask, gateway, DNS server and lease, and `ping`,
+`dns` and `ntp` ride the radio.  Frames go out through
+`tiku_wireless_tx_eth` (the libraries copy them) and come in on the
+libraries' task, which queues each buffer for the runner: the IP stack sees
+them in the kernel thread, and each buffer goes back once delivered -- or at
+once, when nothing listens.
+
 Bring-up tracing (every blocking wait, task and interrupt route) is
 compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
 
 ## Files
 
 - `tiku_drv_wifi_esp.c/.h` -- the driver descriptor, the XIP check, the
-  radio's on/off and the `tiku_wireless` interface
+  radio's on/off, joining, the frame path and the `tiku_wireless` interface
 - `esp_osi.c` -- the OS the libraries run on: locks and queues over kernel
   wait queues, tasks as worker threads, timers on SYSTIMER's driver alarm,
   their interrupt lines on the radio's CLIC lines

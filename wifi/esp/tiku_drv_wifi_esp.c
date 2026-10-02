@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <hal/tiku_cpu.h>
 #include <interfaces/wireless/tiku_wireless.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
@@ -26,10 +27,16 @@
 #define ESPW_XIP_MAGIC   0x31504958UL           /* "XIP1" */
 
 /* The runner's own events, posted from the stack's task: a scan finished,
- * the station joined, the station left (data: the reason). */
+ * the station joined, the station left (data: the reason), frames came. */
 #define ESPW_EV_SCAN_DONE (TIKU_EVENT_USER + 0x20U)
 #define ESPW_EV_LINK_UP   (TIKU_EVENT_USER + 0x21U)
 #define ESPW_EV_LINK_DOWN (TIKU_EVENT_USER + 0x22U)
+#define ESPW_EV_RX        (TIKU_EVENT_USER + 0x23U)
+
+/* Received frames waiting for the kernel thread, at most. */
+#define ESPW_RX_SLOTS    8U
+#define ESPW_ETH_HDR     14U
+#define ESPW_ETH_MAX     1514U
 
 /* Attempts at a join, the first included, before it is reported failed. */
 #define ESPW_JOIN_TRIES  3U
@@ -38,9 +45,10 @@
 #define ESPW_PSK_ROUNDS  4096U
 #define ESPW_PMK_LEN     32U
 
-/* The libraries' heap, taken from the SRAM tier while the radio is up. */
+/* The libraries' heap, taken from the SRAM tier while the radio is up: 30 KB
+ * at rest, 36 KB at most measured joined with IP traffic and a scan. */
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
-#define TIKU_DRV_WIFI_ESP_HEAP_BYTES (56U * 1024U)
+#define TIKU_DRV_WIFI_ESP_HEAP_BYTES (48U * 1024U)
 #endif
 
 extern char _etext[];
@@ -96,6 +104,21 @@ static uint8_t           espw_channel;
 static uint32_t          espw_link_raw;     /* the last reason it dropped */
 static tiku_clock_time_t espw_join_start;
 static uint32_t          espw_join_ticks;
+
+/* Frames received, from the stack's task to the kernel thread: the stack's
+ * own buffers, queued by pointer and given back once delivered. */
+typedef struct {
+    void    *buf;
+    void    *eb;
+    uint16_t len;
+} espw_rx_slot_t;
+
+static espw_rx_slot_t     espw_rxq[ESPW_RX_SLOTS];
+static uint8_t            espw_rx_head;     /* the stack's task moves it */
+static uint8_t            espw_rx_tail;     /* the runner moves it */
+static uint8_t            espw_rx_posted;
+static tiku_wireless_rx_t espw_rx_cb;
+static void              *espw_rx_ctx;
 
 TIKU_PROCESS(espw_runner, "wifi-esp");
 
@@ -383,6 +406,62 @@ static void espw_join_down(uint32_t reason) {
     }
 }
 
+/*---------------------------------------------------------------------------*/
+/* Frames                                                                    */
+/*---------------------------------------------------------------------------*/
+
+/**
+ * @brief The stack's receiver, on its task: queue the frame for the kernel
+ *        thread, one event for a batch.  With no receiver, or the queue
+ *        full, the frame goes straight back.
+ */
+static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb) {
+    uint8_t next, post = 0U;
+
+    tiku_atomic_enter();
+    next = (uint8_t)((espw_rx_head + 1U) % ESPW_RX_SLOTS);
+    if (espw_rx_cb != NULL && next != espw_rx_tail) {
+        espw_rxq[espw_rx_head].buf = buffer;
+        espw_rxq[espw_rx_head].eb = eb;
+        espw_rxq[espw_rx_head].len = len;
+        espw_rx_head = next;
+        post = !espw_rx_posted;
+        espw_rx_posted = 1U;
+        eb = NULL;
+    }
+    tiku_atomic_exit();
+    if (eb != NULL) {
+        esp_wifi_internal_free_rx_buffer(eb);
+    } else if (post &&
+               !tiku_process_post(&espw_runner, ESPW_EV_RX, NULL)) {
+        espw_rx_posted = 0U;            /* the next frame posts again */
+    }
+    return ESP_OK;
+}
+
+/** @brief In the kernel thread: hand each queued frame to the receiver
+ *         (unless @p deliver is 0), then give its buffer back. */
+static void espw_rx_drain(int deliver) {
+    for (;;) {
+        espw_rx_slot_t f;
+
+        tiku_atomic_enter();
+        espw_rx_posted = 0U;
+        if (espw_rx_tail == espw_rx_head) {
+            tiku_atomic_exit();
+            return;
+        }
+        f = espw_rxq[espw_rx_tail];
+        espw_rx_tail = (uint8_t)((espw_rx_tail + 1U) % ESPW_RX_SLOTS);
+        tiku_atomic_exit();
+        if (deliver && espw_rx_cb != NULL &&
+            espw_link == TIKU_WIRELESS_LINK_JOINED) {
+            espw_rx_cb((const uint8_t *)f.buf, f.len, espw_rx_ctx);
+        }
+        esp_wifi_internal_free_rx_buffer(f.eb);
+    }
+}
+
 /** @brief The runner: starts what the interface asked for, in the kernel
  *         thread, and follows what the stack finished. */
 TIKU_PROCESS_THREAD(espw_runner, ev, data)
@@ -402,6 +481,8 @@ TIKU_PROCESS_THREAD(espw_runner, ev, data)
             espw_join_down((uint32_t)(uintptr_t)data);
         } else if (ev == TIKU_WIRELESS_EVT_DISCONNECT) {
             espw_leave();
+        } else if (ev == ESPW_EV_RX) {
+            espw_rx_drain(1);
         }
     }
     TIKU_PROCESS_END();
@@ -507,6 +588,7 @@ static int espw_power_up(void) {
         return TIKU_DRV_ERR_INIT;
     }
     (void)esp_wifi_get_mac(WIFI_IF_STA, espw_mac);
+    (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, espw_rx);
     espw_up = 1U;
     tiku_esp32c61_sleep_hold(1);        /* the modem runs on the PLL */
 
@@ -526,20 +608,26 @@ static int espw_power_up(void) {
 }
 
 static int espw_power_down(void) {
+    espw_heap_stats_t st;
     esp_err_t rc;
 
     espw_want = 0U;
     memset(espw_want_psk, 0, sizeof espw_want_psk);
     espw_leave();
+    (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, NULL);
     rc = esp_wifi_stop();
     if (rc != ESP_OK) {
         ESPW_PRINTF("stop: 0x%lx\n", (unsigned long)rc);
     }
+    espw_rx_drain(0);                   /* the stack's buffers, back */
     espw_up = 0U;
     espw_scanning = 0U;
     tiku_esp32c61_sleep_hold(0);
+    espw_heap_stats(&st);
     espw_teardown(3);
-    ESPW_PRINTF("down\n");
+    ESPW_PRINTF("down: the heap peaked at %lu of %lu bytes, %lu refused\n",
+                (unsigned long)(st.size - st.low), (unsigned long)st.size,
+                (unsigned long)st.fails);
     return TIKU_DRV_OK;
 }
 
@@ -654,6 +742,31 @@ int tiku_wireless_forget(void) {
     if (espw_up) {
         (void)tiku_wireless_disconnect();
     }
+    return TIKU_DRV_OK;
+}
+
+int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
+    int rc;
+
+    if (frame == NULL || len < ESPW_ETH_HDR || len > ESPW_ETH_MAX ||
+        !espw_up || espw_link != TIKU_WIRELESS_LINK_JOINED) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    rc = esp_wifi_internal_tx(WIFI_IF_STA, (void *)(uintptr_t)frame, len);
+    if (rc == ESP_OK) {
+        return TIKU_DRV_OK;
+    }
+    return rc == ESP_ERR_NO_MEM ? TIKU_DRV_ERR_TIMEOUT : TIKU_DRV_ERR_INVALID;
+}
+
+int tiku_wireless_set_rx(tiku_wireless_rx_t cb, void *ctx) {
+    if (!espw_ready) {
+        return TIKU_DRV_ERR_NOT_PRESENT;
+    }
+    tiku_atomic_enter();
+    espw_rx_cb = cb;
+    espw_rx_ctx = ctx;
+    tiku_atomic_exit();
     return TIKU_DRV_OK;
 }
 

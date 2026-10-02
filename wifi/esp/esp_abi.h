@@ -664,6 +664,13 @@ void esp_wifi_deauthenticate_internal(uint8_t reason_code);
 uint8_t esp_wifi_sta_get_pairwise_cipher_internal(void);
 uint8_t esp_wifi_sta_get_group_cipher_internal(void);
 
+/** @brief libnet80211/libpp: the station's frames.  A received one is an
+ *         Ethernet II frame the stack lends until its @p eb is freed; one
+ *         sent is copied (esp_wifi_internal_tx). */
+typedef esp_err_t (*wifi_rxcb_t)(void *buffer, uint16_t len, void *eb);
+esp_err_t esp_wifi_internal_reg_rxcb(wifi_interface_t ifx, wifi_rxcb_t fn);
+void esp_wifi_internal_free_rx_buffer(void *eb);
+
 /** @brief The base the stack posts its events under (esp_glue.c). */
 extern const char *WIFI_EVENT;
 
