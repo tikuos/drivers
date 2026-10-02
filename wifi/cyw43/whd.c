@@ -2516,6 +2516,11 @@ int tiku_wireless_set_rx(tiku_wireless_rx_t cb, void *ctx)
     return whd_register_rx_callback(cb, ctx);
 }
 
+int tiku_wireless_rx_poll(void)
+{
+    return whd_drain_rx();
+}
+
 uint8_t tiku_wireless_scan_results(cyw43_ap_t *out, uint8_t max_results)
 {
     uint8_t i;
