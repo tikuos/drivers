@@ -2503,6 +2503,19 @@ int tiku_wireless_forget(void)
     return TIKU_DRV_OK;
 }
 
+/* Frames: the chip's own calls, which already run in the kernel thread (the
+ * runner's RX poll calls the receiver). */
+
+int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len)
+{
+    return whd_tx_eth(frame, len);
+}
+
+int tiku_wireless_set_rx(tiku_wireless_rx_t cb, void *ctx)
+{
+    return whd_register_rx_callback(cb, ctx);
+}
+
 uint8_t tiku_wireless_scan_results(cyw43_ap_t *out, uint8_t max_results)
 {
     uint8_t i;
