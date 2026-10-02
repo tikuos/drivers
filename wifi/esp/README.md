@@ -12,7 +12,7 @@ note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
 | R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | done: `wifi on` calibrates in 66 ms, starts the station, reports the MAC |
 | R2 | Scan through `tiku_wireless` | done: `wifi scan` finds the APs around the bench (30-36 in 2.4 s) |
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
-| R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS waits on room -- code in flash, buffers in PSRAM |
+| R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS builds and runs to the network with code in flash and buffers in PSRAM -- live sites wait on an open network |
 | R5 | Radio off: sleep numbers unchanged | pending |
 | R6 | BLE | later |
 
@@ -67,8 +67,12 @@ of calling into it:
 
 The SRAM image is 221 KB (the libraries' `.iram1` code and data, the
 supplicant and its crypto included), 236 KB with the IP stack, and
-`xip.bin` 381 KB.  BIG BASIC and the radio do not fit SRAM together yet,
-nor TLS: HTTPS here needs code in flash and big buffers in PSRAM first.
+`xip.bin` 381 KB.  BASIC with HTTPS does not fit SRAM beside the radio
+as it stands: build it with `TIKU_ESP32C61_XIP_CODE=1` (BASIC, the shell's
+commands, the IP stack, TLS and crypto run from flash) and
+`TIKU_ESP32C61_PSRAM_DATA=1` (TLS's and BASIC's big buffers in PSRAM) -- 135
+KB of SRAM image then, a 79 KB SRAM tier.  HTTPGET$ needs the trust store in
+`/data/roots.bin` (`tools/gen_roots.py`).
 
 ## Using it
 

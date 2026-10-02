@@ -15,7 +15,4 @@
 /** @brief The driver's descriptor, listed in drivers/tiku_drv_table.c. */
 extern const tiku_drv_t tiku_drv_wifi_esp;
 
-/** @brief Non-zero when xip.bin in flash belongs to the running image. */
-int tiku_drv_wifi_esp_xip_ok(void);
-
 #endif /* TIKU_DRV_WIFI_ESP_H_ */

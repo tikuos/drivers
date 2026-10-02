@@ -2,10 +2,10 @@
  * Tiku Drivers - ESP32-C61 Wi-Fi over Espressif's radio libraries
  *
  * The libraries' code lives in the XIP window, written as xip.bin beside the
- * boot image; its header records where this image's text and bss end, so a
- * flash holding another build's xip.bin is refused, never called into.  The
- * radio is off until asked: up takes a heap from the SRAM tier and starts
- * the OS adapter and the station; down stops them and gives the heap back.
+ * boot image; a flash holding another build's xip.bin (the arch's header
+ * check) is refused, never called into.  The radio is off until asked: up
+ * takes a heap from the SRAM tier and starts the OS adapter and the station;
+ * down stops them and gives the heap back.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -17,14 +17,14 @@
 #include <interfaces/wireless/tiku_wireless.h>
 #include <kernel/memory/tiku_mem.h>
 #include <kernel/process/tiku_process.h>
+#include <kernel/threads/tiku_thread.h>
 #include <kernel/timers/tiku_clock.h>
 #include <arch/esp32c61/tiku_sleep_arch.h>
+#include <arch/esp32c61/tiku_xip_arch.h>
 #include <tikukits/crypto/pbkdf2/tiku_kits_crypto_pbkdf2.h>
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
 #include "esp_port.h"
-
-#define ESPW_XIP_MAGIC   0x31504958UL           /* "XIP1" */
 
 /* The runner's own events, posted from the stack's task: a scan finished,
  * the station joined, the station left (data: the reason), frames came. */
@@ -50,20 +50,6 @@
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (48U * 1024U)
 #endif
-
-extern char _etext[];
-extern char __bss_end[];
-
-typedef struct {
-    uint32_t magic;
-    uint32_t etext;         /* this image's _etext and __bss_end: any */
-    uint32_t bss_end;       /* rebuild that moves the kernel moves them */
-} espw_xip_header_t;
-
-__attribute__((section(".xip.header"), used))
-static const espw_xip_header_t espw_xip_header = {
-    ESPW_XIP_MAGIC, (uint32_t)(uintptr_t)_etext, (uint32_t)(uintptr_t)__bss_end
-};
 
 /* What the link must carry whole: the stack's entry points and all they
  * reach. */
@@ -115,23 +101,13 @@ typedef struct {
 
 static espw_rx_slot_t     espw_rxq[ESPW_RX_SLOTS];
 static uint8_t            espw_rx_head;     /* the stack's task moves it */
-static uint8_t            espw_rx_tail;     /* the runner moves it */
-static uint8_t            espw_rx_posted;
+static uint8_t            espw_rx_tail;     /* the kernel thread moves it */
+static uint8_t            espw_rx_posted;   /* the runner has an event coming */
+static tiku_waitq_t       espw_rx_waitq;    /* a poller waiting for frames */
 static tiku_wireless_rx_t espw_rx_cb;
 static void              *espw_rx_ctx;
 
 TIKU_PROCESS(espw_runner, "wifi-esp");
-
-int tiku_drv_wifi_esp_xip_ok(void) {
-    /* Through a volatile view: the compiler knows the initializer, but the
-     * flash may hold an older build's bytes. */
-    const volatile espw_xip_header_t *h =
-        (const volatile espw_xip_header_t *)&espw_xip_header;
-
-    return h->magic == ESPW_XIP_MAGIC &&
-           h->etext == (uint32_t)(uintptr_t)_etext &&
-           h->bss_end == (uint32_t)(uintptr_t)__bss_end;
-}
 
 /*---------------------------------------------------------------------------*/
 /* Events from the libraries                                                 */
@@ -412,8 +388,8 @@ static void espw_join_down(uint32_t reason) {
 
 /**
  * @brief The stack's receiver, on its task: queue the frame for the kernel
- *        thread, one event for a batch.  With no receiver, or the queue
- *        full, the frame goes straight back.
+ *        thread -- one runner event outstanding at most, and a poller woken.
+ *        With no receiver, or the queue full, the frame goes straight back.
  */
 static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb) {
     uint8_t next, post = 0U;
@@ -432,24 +408,28 @@ static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb) {
     tiku_atomic_exit();
     if (eb != NULL) {
         esp_wifi_internal_free_rx_buffer(eb);
-    } else if (post &&
-               !tiku_process_post(&espw_runner, ESPW_EV_RX, NULL)) {
+        return ESP_OK;
+    }
+    tiku_thread_wake_all(&espw_rx_waitq);
+    if (post && !tiku_process_post(&espw_runner, ESPW_EV_RX, NULL)) {
         espw_rx_posted = 0U;            /* the next frame posts again */
     }
     return ESP_OK;
 }
 
 /** @brief In the kernel thread: hand each queued frame to the receiver
- *         (unless @p deliver is 0), then give its buffer back. */
-static void espw_rx_drain(int deliver) {
+ *         (unless @p deliver is 0), then give its buffer back.
+ *         @return Frames delivered */
+static int espw_rx_drain(int deliver) {
+    int n = 0;
+
     for (;;) {
         espw_rx_slot_t f;
 
         tiku_atomic_enter();
-        espw_rx_posted = 0U;
         if (espw_rx_tail == espw_rx_head) {
             tiku_atomic_exit();
-            return;
+            return n;
         }
         f = espw_rxq[espw_rx_tail];
         espw_rx_tail = (uint8_t)((espw_rx_tail + 1U) % ESPW_RX_SLOTS);
@@ -457,6 +437,7 @@ static void espw_rx_drain(int deliver) {
         if (deliver && espw_rx_cb != NULL &&
             espw_link == TIKU_WIRELESS_LINK_JOINED) {
             espw_rx_cb((const uint8_t *)f.buf, f.len, espw_rx_ctx);
+            n++;
         }
         esp_wifi_internal_free_rx_buffer(f.eb);
     }
@@ -482,7 +463,9 @@ TIKU_PROCESS_THREAD(espw_runner, ev, data)
         } else if (ev == TIKU_WIRELESS_EVT_DISCONNECT) {
             espw_leave();
         } else if (ev == ESPW_EV_RX) {
-            espw_rx_drain(1);
+            espw_rx_posted = 0U;        /* before the drain: a frame after it
+                                         * posts again */
+            (void)espw_rx_drain(1);
         }
     }
     TIKU_PROCESS_END();
@@ -619,7 +602,7 @@ static int espw_power_down(void) {
     if (rc != ESP_OK) {
         ESPW_PRINTF("stop: 0x%lx\n", (unsigned long)rc);
     }
-    espw_rx_drain(0);                   /* the stack's buffers, back */
+    (void)espw_rx_drain(0);             /* the stack's buffers, back */
     espw_up = 0U;
     espw_scanning = 0U;
     tiku_esp32c61_sleep_hold(0);
@@ -770,13 +753,27 @@ int tiku_wireless_set_rx(tiku_wireless_rx_t cb, void *ctx) {
     return TIKU_DRV_OK;
 }
 
+/* The stack's task is a worker: the kernel thread, busy, must give it the CPU
+ * -- up to a tick, less when a frame comes -- before frames can come. */
+int tiku_wireless_rx_poll(void) {
+    if (!espw_up || !tiku_thread_in_kernel()) {
+        return 0;
+    }
+    tiku_atomic_enter();
+    if (espw_rx_tail == espw_rx_head) {
+        (void)tiku_thread_wait(&espw_rx_waitq, 1UL);
+    }
+    tiku_atomic_exit();
+    return espw_rx_drain(1);
+}
+
 /*---------------------------------------------------------------------------*/
 /* The driver                                                                */
 /*---------------------------------------------------------------------------*/
 
 static int espw_init(void) {
     (void)espw_roots;
-    if (!tiku_drv_wifi_esp_xip_ok()) {
+    if (!tiku_esp32c61_xip_ok()) {
         ESPW_PRINTF("xip.bin in flash is not this build's -- make flash "
                     "writes both images\n");
         return TIKU_DRV_ERR_NOT_PRESENT;
