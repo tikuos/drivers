@@ -15,7 +15,7 @@ The design notes, milestones and decisions live in
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS builds and runs to the network with code in flash and buffers in PSRAM -- live sites wait on an open network |
 | R5 | Radio off: sleep numbers unchanged | pending |
-| R6 | BLE: the LE controller under tikuOS's own host stack | in part: `bt on` brings the controller up (HCI Reset, version, address through the host), `bt scan` finds the advertisers around the bench, `bt advertise` runs; connections next, then Wi-Fi and BLE together |
+| R6 | BLE: the LE controller under tikuOS's own host stack | in part: `bt on` brings the controller up (HCI Reset, version, address through the host), `bt scan` finds the advertisers around the bench, `bt advertise` runs; TikuBench bt 114/114 on the C61; connections need a second device, then Wi-Fi and BLE together |
 
 ## Fetching the libraries
 
@@ -170,19 +170,23 @@ tikuOS:/> bt scan
 tikuOS:/> bt list
 tikuOS:/> bt advertise TikuC61
 tikuOS:/> bt off
-[esp-ble] down: the heap peaked at 40912 bytes, 0 packets dropped
+[esp-ble] down: the heap peaked at 32536 of 40960 bytes, 0 refused, 0 packets dropped
 ```
 
-`bt on` takes 64 KB from the SRAM tier for the controller's heap (37 KB
-in use at rest, 41 KB scanning), registers what the controller calls --
+`bt on` takes 40 KB from the SRAM tier for the controller's heap (28 KB
+in use at rest, 33 KB scanning and advertising at once), registers what
+the controller calls --
 `esp_npl.c`, its OS (events, queues, callouts, locks) over kernel wait
 queues and the shim's timer service, and `esp_mempool.c`, the memory pools
 it imports -- clocks the BLE MAC, and initialises and enables the
 controller in the order IDF does.  The controller's code runs from flash,
 as IDF's run-in-flash-only mode places it, with that mode's relaxed timing;
-only its 2 KB of hot paths and its data stay in SRAM.  The address is the
-factory MAC's third universal one (last byte + 2).  `bt off` stops it all
-and gives the heap back.
+only its 2 KB of hot paths and its data stay in SRAM.  Its configuration is
+IDF's default cut to what the host uses -- one link, a 23-byte ATT MTU,
+legacy advertising: 8 high-priority event buffers, 4 ACL buffers of 255
+bytes, 251-byte advertising data, msys 8 x 256 + 8 x 320 -- a quarter less
+memory than IDF's.  The address is the factory MAC's third universal one
+(last byte + 2).  `bt off` stops it all and gives the heap back.
 
 Its task is a worker thread, and the kernel thread runs first: the driver
 waits for the controller's first HCI NOP before the host starts, and lets

@@ -38,13 +38,15 @@
 #include "esp_port.h"
 #include "tiku_drv_ble_esp.h"
 
-/* The controller's heap, from the SRAM tier while it is on. */
+/* The controller's heap, from the SRAM tier while it is on: 28 KB in use at
+ * rest, 33 KB at most measured scanning and advertising at once. */
 #ifndef TIKU_DRV_BLE_ESP_HEAP_BYTES
-#define TIKU_DRV_BLE_ESP_HEAP_BYTES (64U * 1024U)
+#define TIKU_DRV_BLE_ESP_HEAP_BYTES (40U * 1024U)
 #endif
 
-/* HCI packets on their way to the host: type byte, then the packet. */
-#define ESPB_RX_BYTES       4096U
+/* HCI packets on their way to the host: type byte, then the packet.  The
+ * host drains it every tick; a busy room's reports fit in 2 KB. */
+#define ESPB_RX_BYTES       2048U
 
 /* Bring-up trace: HCI commands, events and receives. */
 #ifndef ESPB_TRACE
@@ -61,11 +63,12 @@
 #define DUP_ALL             0xFFFFFFFFUL
 #define DUP_CACHE           20U
 
-/* The msys buffer pools, IDF's defaults: 12 x 256 and 24 x 320, heap. */
+/* The msys buffer pools, from the heap: IDF's sizes, a third of its 12 + 24
+ * blocks -- one link's ACL at a 23-byte ATT MTU needs few. */
 #define MSYS_1_SIZE         256U
 #define MSYS_2_SIZE         320U
-#define MSYS_1_COUNT        12U
-#define MSYS_2_COUNT        24U
+#define MSYS_1_COUNT        8U
+#define MSYS_2_COUNT        8U
 
 static uint8_t       espb_ready;        /* xip.bin is this build's */
 static uint8_t       espb_up;           /* enabled: HCI flows */
@@ -226,8 +229,9 @@ static espb_coex_funcs_t espb_coex = {
     ._coex_schm_status_bit_clear = espb_coex_bits,
 };
 
-/** @brief IDF's default controller configuration for the C61 (a build with
- *         the controller only, HCI in memory, BLE 5 features on). */
+/** @brief IDF's default controller configuration for the C61 (controller
+ *         only, HCI in memory, BLE 5 features on), cut to what tikuOS's host
+ *         uses: one link, a 23-byte ATT MTU, legacy advertising. */
 static void espb_config(espb_config_t *c) {
     tiku_esp32c61_clock_t clk;
 
@@ -235,7 +239,7 @@ static void espb_config(espb_config_t *c) {
     memset(c, 0, sizeof *c);
     c->config_version = ESPB_CONFIG_VERSION;
     c->ble_ll_resolv_list_size = 4U;
-    c->ble_hci_evt_hi_buf_count = 30U;
+    c->ble_hci_evt_hi_buf_count = 8U;   /* IDF: 30 */
     c->ble_hci_evt_lo_buf_count = 8U;
     c->ble_ll_sync_list_cnt = 5U;
     c->ble_ll_sync_cnt = 1U;
@@ -250,16 +254,16 @@ static void espb_config(espb_config_t *c) {
     c->ble_ll_sched_max_adv_pdu_usecs = 376U;
     c->ble_ll_sched_direct_adv_max_usecs = 502U;
     c->ble_ll_sched_adv_max_usecs = 852U;
-    c->ble_scan_rsp_data_max_len = 1650U;
+    c->ble_scan_rsp_data_max_len = 251U;    /* IDF: 1650 */
     c->ble_ll_cfg_num_hci_cmd_pkts = 1U;
     c->ble_ll_ctrl_proc_timeout_ms = 40000U;
-    c->nimble_max_connections = 3U;
+    c->nimble_max_connections = 1U;     /* the host keeps one */
     c->ble_whitelist_size = 12U;
-    c->ble_acl_buf_size = 517U;
-    c->ble_acl_buf_count = 10U;
+    c->ble_acl_buf_size = 255U;         /* IDF: 517 x 10 */
+    c->ble_acl_buf_count = 4U;
     c->ble_hci_evt_buf_size = 257U;
     c->ble_multi_adv_instances = 1U;
-    c->ble_ext_adv_max_size = 1650U;
+    c->ble_ext_adv_max_size = 251U;     /* IDF: 1650 */
     c->controller_task_stack_size = 4096U;
     c->controller_task_prio = 23U;
     c->cca_rssi_thresh = (uint8_t)(256U - 50U);
@@ -273,7 +277,7 @@ static void espb_config(espb_config_t *c) {
     c->fast_conn_data_tx_en = 1U;
     c->ch39_txpwr = 9;
     c->adv_rsv_cnt = 1U;
-    c->conn_rsv_cnt = 2U;
+    c->conn_rsv_cnt = 1U;
     c->priority_level_cfg = (1U << 4) | (1U << 2);  /* sync, periodic: mid */
     c->config_magic = ESPB_CONFIG_MAGIC;
 }
@@ -717,9 +721,14 @@ static int espb_power_up(void) {
 }
 
 static int espb_power_down(void) {
+    espw_heap_stats_t st;
+
+    espw_heap_stats(&st);
     espb_teardown(STAGE_ENABLED);
-    ESPB_PRINTF("down: the heap peaked at %lu bytes, %lu packets dropped\n",
-                (unsigned long)espb_heap_peak, (unsigned long)rx_dropped);
+    ESPB_PRINTF("down: the heap peaked at %lu of %lu bytes, %lu refused, "
+                "%lu packets dropped\n", (unsigned long)espb_heap_peak,
+                (unsigned long)st.size, (unsigned long)st.fails,
+                (unsigned long)rx_dropped);
     return TIKU_DRV_OK;
 }
 
@@ -743,6 +752,7 @@ void tiku_drv_ble_esp_status(tiku_drv_ble_esp_status_t *out) {
         espw_heap_stats(&st);
         out->heap_size = st.size;
         out->heap_used = st.size - st.free;
+        out->heap_refused = st.fails;
         espb_note_heap();
     }
     out->heap_peak = espb_heap_peak;

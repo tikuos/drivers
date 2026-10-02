@@ -32,6 +32,7 @@ typedef struct {
     uint32_t    heap_used;
     uint32_t    heap_size;
     uint32_t    heap_peak;
+    uint32_t    heap_refused;   /* allocations the heap could not meet */
     uint32_t    rx_dropped;     /* HCI packets the host had no room for */
     uint32_t    irqs;           /* the radios' interrupts since boot */
 } tiku_drv_ble_esp_status_t;
