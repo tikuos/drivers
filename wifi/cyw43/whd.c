@@ -2426,6 +2426,15 @@ int tiku_wireless_status(cyw43_wifi_status_t *out)
     return TIKU_DRV_OK;
 }
 
+int tiku_wireless_power(uint8_t on)
+{
+    /* Brought up at boot and kept up: there is no power-down path. */
+    if (on) {
+        return cyw43_state.up ? TIKU_DRV_OK : TIKU_DRV_ERR_NOT_PRESENT;
+    }
+    return TIKU_DRV_ERR_INVALID;
+}
+
 int tiku_wireless_connect_auth(const char *ssid, const char *psk,
                                tiku_wireless_auth_t auth)
 {
