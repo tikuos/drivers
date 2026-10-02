@@ -636,10 +636,10 @@ static const tiku_bt_transport_t cyw43_bt_transport = {
     .send     = cyw43_bt_send_cb,
     .recv     = cyw43_bt_recv_cb,
     .is_ready = cyw43_bt_is_ready_cb,
+    .version  = cyw43_bt_fw_version,
 };
 
-/** Public BTFW version string getter — used by the generic stack
- *  via the weak override in tiku_bt.c, kept simple here. */
+/** Public BTFW version string getter -- the transport's version hook. */
 const char *cyw43_bt_fw_version(void)
 {
     return tx_state.fw_version;

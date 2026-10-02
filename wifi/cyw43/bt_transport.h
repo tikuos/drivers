@@ -44,6 +44,12 @@ extern "C" {
  */
 int cyw43_bt_init(void);
 
+/**
+ * @brief The BTFW version string from the firmware blob's header (the
+ *        transport's version hook).
+ */
+const char *cyw43_bt_fw_version(void);
+
 #ifdef __cplusplus
 }
 #endif
