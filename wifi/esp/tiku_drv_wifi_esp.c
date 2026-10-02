@@ -18,14 +18,25 @@
 #include <kernel/process/tiku_process.h>
 #include <kernel/timers/tiku_clock.h>
 #include <arch/esp32c61/tiku_sleep_arch.h>
+#include <tikukits/crypto/pbkdf2/tiku_kits_crypto_pbkdf2.h>
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
 #include "esp_port.h"
 
 #define ESPW_XIP_MAGIC   0x31504958UL           /* "XIP1" */
 
-/* The runner's own event: the stack has finished a scan (from its task). */
+/* The runner's own events, posted from the stack's task: a scan finished,
+ * the station joined, the station left (data: the reason). */
 #define ESPW_EV_SCAN_DONE (TIKU_EVENT_USER + 0x20U)
+#define ESPW_EV_LINK_UP   (TIKU_EVENT_USER + 0x21U)
+#define ESPW_EV_LINK_DOWN (TIKU_EVENT_USER + 0x22U)
+
+/* Attempts at a join, the first included, before it is reported failed. */
+#define ESPW_JOIN_TRIES  3U
+
+/* WPA2's passphrase-to-PMK mapping: PBKDF2-HMAC-SHA1, 4096 rounds. */
+#define ESPW_PSK_ROUNDS  4096U
+#define ESPW_PMK_LEN     32U
 
 /* The libraries' heap, taken from the SRAM tier while the radio is up. */
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
@@ -70,6 +81,22 @@ static volatile uint8_t  espw_scanning;
 static tiku_clock_time_t espw_scan_start;
 static uint32_t          espw_scan_ticks;
 
+/* A join asked for, until the runner takes it up; the passphrase lasts
+ * only until its PMK is derived. */
+static char              espw_want_ssid[33];
+static char              espw_want_psk[64];
+static uint8_t           espw_want;
+
+/* The network joined, or being joined, and how that stands. */
+static char              espw_ssid[33];
+static volatile uint8_t  espw_link;         /* tiku_wireless_link_t */
+static uint8_t           espw_tries;
+static uint8_t           espw_bssid[6];
+static uint8_t           espw_channel;
+static uint32_t          espw_link_raw;     /* the last reason it dropped */
+static tiku_clock_time_t espw_join_start;
+static uint32_t          espw_join_ticks;
+
 TIKU_PROCESS(espw_runner, "wifi-esp");
 
 int tiku_drv_wifi_esp_xip_ok(void) {
@@ -107,6 +134,20 @@ void espw_event(const char *base, int32_t id, const void *data, size_t len) {
         break;
     case WIFI_EVENT_STA_STOP:
         ESPW_PRINTF("station stopped\n");
+        break;
+    case WIFI_EVENT_STA_CONNECTED:
+        if (data != NULL) {
+            const wifi_event_sta_connected_t *c = data;
+
+            memcpy(espw_bssid, c->bssid, sizeof espw_bssid);
+            espw_channel = c->channel;
+        }
+        (void)tiku_process_post(&espw_runner, ESPW_EV_LINK_UP, NULL);
+        break;
+    case WIFI_EVENT_STA_DISCONNECTED:
+        (void)tiku_process_post(&espw_runner, ESPW_EV_LINK_DOWN,
+            (tiku_event_data_t)(uintptr_t)(data != NULL ?
+                ((const wifi_event_sta_disconnected_t *)data)->reason : 0U));
         break;
     default:
         break;
@@ -174,8 +215,176 @@ static void espw_scan_collect(uint32_t status) {
                             (tiku_event_data_t)(uintptr_t)espw_ap_count);
 }
 
+/*---------------------------------------------------------------------------*/
+/* Joining                                                                   */
+/*---------------------------------------------------------------------------*/
+
+static uint32_t espw_ms(uint32_t ticks) {
+    return (uint32_t)(ticks * 1000UL / TIKU_CLOCK_SECOND);
+}
+
+/** @brief Why a join or a link ended, for the reasons seen most. */
+static const char *espw_reason(uint32_t reason) {
+    switch (reason) {
+    case 2U:   return "authentication expired";
+    case 15U:
+    case 204U: return "key handshake timed out -- wrong passphrase?";
+    case 200U: return "the AP's beacons stopped";
+    case 201U: return "no AP of that name";
+    case 202U: return "authentication failed";
+    case 203U: return "association failed";
+    case 210U:
+    case 211U: return "no AP of that name with WPA2-PSK or open";
+    default:   return "an IEEE 802.11 reason";
+    }
+}
+
+/** @brief The join is over without a link (@p what says why): say so, and
+ *         to whoever listens. */
+static void espw_join_failed(uint32_t why, const char *what) {
+    espw_link = TIKU_WIRELESS_LINK_FAILED;
+    espw_link_raw = why;
+    espw_join_ticks = (uint32_t)(tiku_clock_time_t)(tiku_clock_time() -
+                                                    espw_join_start);
+    ESPW_PRINTF("join FAILED: %s -- %s (code %lu, %lu ms)\n", espw_ssid,
+                what, (unsigned long)why,
+                (unsigned long)espw_ms(espw_join_ticks));
+    (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                            TIKU_WIRELESS_EVT_LINK_DOWN,
+                            (tiku_event_data_t)(uintptr_t)why);
+}
+
+/** @brief Leave the network: no rejoining after.  The stack's word that
+ *         the station left comes later, and is not a loss. */
+static void espw_leave(void) {
+    uint8_t was = espw_link;
+
+    espw_link = TIKU_WIRELESS_LINK_IDLE;
+    espw_tries = 0U;
+    espw_wpa_set_pmk(NULL);
+    if (was != TIKU_WIRELESS_LINK_JOINED &&
+        was != TIKU_WIRELESS_LINK_CONNECTING) {
+        return;
+    }
+    (void)esp_wifi_disconnect_internal();
+    if (was == TIKU_WIRELESS_LINK_JOINED) {
+        ESPW_PRINTF("*** LINK DOWN -- left %s ***\n", espw_ssid);
+        (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                TIKU_WIRELESS_EVT_LINK_DOWN,
+                                (tiku_event_data_t)(uintptr_t)0);
+    }
+}
+
+/**
+ * @brief Configure the station for the network asked for and start joining,
+ *        leaving the one joined first.  The passphrase becomes its PMK here
+ *        and is wiped; PMF goes off; the strongest AP of the name is tried.
+ */
+static void espw_join_begin(void) {
+    size_t slen, plen = strlen(espw_want_psk);
+    uint8_t pmk[ESPW_PMK_LEN];
+    wifi_config_t cfg;
+    esp_err_t rc;
+
+    if (!espw_want || !espw_up) {
+        espw_want = 0U;
+        memset(espw_want_psk, 0, sizeof espw_want_psk);
+        return;
+    }
+    espw_want = 0U;
+    if (espw_link == TIKU_WIRELESS_LINK_JOINED) {
+        espw_leave();
+    }
+    memcpy(espw_ssid, espw_want_ssid, sizeof espw_ssid);
+    slen = strlen(espw_ssid);
+    espw_link = TIKU_WIRELESS_LINK_CONNECTING;
+    espw_tries = 0U;
+    espw_join_start = tiku_clock_time();
+
+    memset(&cfg, 0, sizeof cfg);
+    memcpy(cfg.sta.ssid, espw_ssid, slen);
+    cfg.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    cfg.sta.features = WIFI_STA_NO_WPA3_COMPAT;
+    if (plen != 0U) {
+        (void)tiku_kits_crypto_pbkdf2_hmac_sha1(
+            (const uint8_t *)espw_want_psk, plen, (const uint8_t *)espw_ssid,
+            slen, ESPW_PSK_ROUNDS, pmk, sizeof pmk);
+        espw_wpa_set_pmk(pmk);
+        memset(pmk, 0, sizeof pmk);
+        memcpy(cfg.sta.password, espw_want_psk, plen);
+        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        espw_wpa_set_pmk(NULL);
+        cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    }
+    memset(espw_want_psk, 0, sizeof espw_want_psk);
+    rc = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    memset(&cfg, 0, sizeof cfg);
+    if (rc == ESP_OK) {
+        rc = esp_wifi_disable_pmf_config(WIFI_IF_STA);
+    }
+    if (rc == ESP_OK) {
+        rc = esp_wifi_connect_internal();
+    }
+    if (rc != ESP_OK) {
+        espw_join_failed((uint32_t)rc, "the stack refused it");
+    }
+}
+
+/** @brief The station has joined: the handshake (if any) is done. */
+static void espw_join_up(void) {
+    if (espw_link != TIKU_WIRELESS_LINK_CONNECTING) {
+        return;                 /* left since, or a repeat */
+    }
+    espw_link = TIKU_WIRELESS_LINK_JOINED;
+    espw_tries = 0U;
+    espw_join_ticks = (uint32_t)(tiku_clock_time_t)(tiku_clock_time() -
+                                                    espw_join_start);
+    ESPW_PRINTF("*** LINK UP -- joined %s (channel %u) in %lu ms ***\n",
+                espw_ssid, (unsigned)espw_channel,
+                (unsigned long)espw_ms(espw_join_ticks));
+    (void)tiku_process_post(TIKU_PROCESS_BROADCAST, TIKU_WIRELESS_EVT_LINK_UP,
+                            (tiku_event_data_t)(uintptr_t)0);
+}
+
+/**
+ * @brief The station has no link.  Leaving (reason 8) is the station's own
+ *        doing and changes nothing; a join that failed is tried again,
+ *        ESPW_JOIN_TRIES in all; a link that dropped is rejoined so.
+ */
+static void espw_join_down(uint32_t reason) {
+    if (!espw_up || (reason == WIFI_REASON_ASSOC_LEAVE &&
+                     espw_link != TIKU_WIRELESS_LINK_JOINED)) {
+        return;
+    }
+    espw_link_raw = reason;
+    if (espw_link == TIKU_WIRELESS_LINK_JOINED) {
+        ESPW_PRINTF("*** LINK DOWN -- lost %s: %s (reason %lu) ***\n",
+                    espw_ssid, espw_reason(reason), (unsigned long)reason);
+        (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
+                                TIKU_WIRELESS_EVT_LINK_DOWN,
+                                (tiku_event_data_t)(uintptr_t)reason);
+        espw_link = TIKU_WIRELESS_LINK_CONNECTING;
+        espw_tries = 0U;
+        espw_join_start = tiku_clock_time();
+    } else if (espw_link != TIKU_WIRELESS_LINK_CONNECTING) {
+        return;
+    } else if (++espw_tries >= ESPW_JOIN_TRIES) {
+        espw_join_failed(reason, espw_reason(reason));
+        return;
+    } else {
+        ESPW_PRINTF("join attempt %u failed: %s (reason %lu); trying again\n",
+                    (unsigned)espw_tries, espw_reason(reason),
+                    (unsigned long)reason);
+    }
+    if (esp_wifi_connect_internal() != ESP_OK) {
+        espw_join_failed(reason, espw_reason(reason));
+    }
+}
+
 /** @brief The runner: starts what the interface asked for, in the kernel
- *         thread, and collects what the stack finished. */
+ *         thread, and follows what the stack finished. */
 TIKU_PROCESS_THREAD(espw_runner, ev, data)
 {
     TIKU_PROCESS_BEGIN();
@@ -185,6 +394,14 @@ TIKU_PROCESS_THREAD(espw_runner, ev, data)
             espw_scan_begin();
         } else if (ev == ESPW_EV_SCAN_DONE && espw_scanning) {
             espw_scan_collect((uint32_t)(uintptr_t)data);
+        } else if (ev == TIKU_WIRELESS_EVT_JOIN_START) {
+            espw_join_begin();
+        } else if (ev == ESPW_EV_LINK_UP) {
+            espw_join_up();
+        } else if (ev == ESPW_EV_LINK_DOWN) {
+            espw_join_down((uint32_t)(uintptr_t)data);
+        } else if (ev == TIKU_WIRELESS_EVT_DISCONNECT) {
+            espw_leave();
         }
     }
     TIKU_PROCESS_END();
@@ -198,8 +415,7 @@ TIKU_PROCESS_THREAD(espw_runner, ev, data)
 static void espw_config(wifi_init_config_t *c) {
     memset(c, 0, sizeof *c);
     c->osi_funcs = &espw_osi_funcs;
-    c->wpa_crypto_funcs.size = sizeof c->wpa_crypto_funcs;
-    c->wpa_crypto_funcs.version = ESP_WIFI_CRYPTO_VERSION;
+    espw_crypto_table(&c->wpa_crypto_funcs);
     c->static_rx_buf_num = 4;
     c->dynamic_rx_buf_num = 8;
     c->tx_buf_type = 1;                 /* dynamic */
@@ -310,8 +526,12 @@ static int espw_power_up(void) {
 }
 
 static int espw_power_down(void) {
-    esp_err_t rc = esp_wifi_stop();
+    esp_err_t rc;
 
+    espw_want = 0U;
+    memset(espw_want_psk, 0, sizeof espw_want_psk);
+    espw_leave();
+    rc = esp_wifi_stop();
     if (rc != ESP_OK) {
         ESPW_PRINTF("stop: 0x%lx\n", (unsigned long)rc);
     }
@@ -338,6 +558,8 @@ int tiku_wireless_power(uint8_t on) {
 }
 
 int tiku_wireless_status(tiku_wireless_status_t *out) {
+    int rssi = 0;
+
     if (out == NULL) {
         return TIKU_DRV_ERR_INVALID;
     }
@@ -345,10 +567,20 @@ int tiku_wireless_status(tiku_wireless_status_t *out) {
     out->up = espw_up;
     memcpy(out->mac, espw_mac, sizeof out->mac);
     out->irq_count = espw_irq_count();
-    out->link_state = TIKU_WIRELESS_LINK_IDLE;
     out->scan_in_progress = espw_scanning;
     out->scan_aps_found = espw_scan_found;
     out->last_scan_ticks = espw_scan_ticks;
+    out->link_state = espw_link;
+    out->link_status_raw = espw_link_raw;
+    out->last_join_ticks = espw_join_ticks;
+    if (espw_up && espw_link == TIKU_WIRELESS_LINK_JOINED) {
+        out->joined_ssid_len = (uint8_t)strlen(espw_ssid);
+        memcpy(out->joined_ssid, espw_ssid, out->joined_ssid_len);
+        memcpy(out->joined_bssid, espw_bssid, sizeof out->joined_bssid);
+        if (esp_wifi_sta_get_rssi(&rssi) == ESP_OK) {
+            out->rssi_dbm = (int16_t)rssi;
+        }
+    }
     return TIKU_DRV_OK;
 }
 
@@ -356,7 +588,8 @@ int tiku_wireless_scan_start(void) {
     if (!espw_up) {
         return TIKU_DRV_ERR_INVALID;
     }
-    if (espw_scanning) {
+    if (espw_scanning || espw_want ||
+        espw_link == TIKU_WIRELESS_LINK_CONNECTING) {
         return TIKU_DRV_ERR_TIMEOUT;
     }
     return tiku_process_post(&espw_runner, TIKU_WIRELESS_EVT_SCAN_START,
@@ -373,14 +606,33 @@ uint8_t tiku_wireless_scan_results(tiku_wireless_ap_t *out,
     return out != NULL ? n : 0U;
 }
 
-/* Joining arrives with the supplicant; until then, refused. */
-
+/* WPA2-PSK, or an open network for an empty passphrase; WPA3 not yet. */
 int tiku_wireless_connect_auth(const char *ssid, const char *psk,
                                tiku_wireless_auth_t auth) {
-    (void)ssid;
-    (void)psk;
-    (void)auth;
-    return TIKU_DRV_ERR_INVALID;
+    size_t slen, plen;
+
+    if (!espw_up || ssid == NULL || psk == NULL ||
+        auth != TIKU_WIRELESS_AUTH_WPA2_PSK) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    slen = strnlen(ssid, sizeof espw_want_ssid);
+    plen = strnlen(psk, sizeof espw_want_psk);
+    if (slen == 0U || slen > 32U || (plen != 0U && (plen < 8U || plen > 63U))) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    if (espw_want || espw_scanning ||
+        espw_link == TIKU_WIRELESS_LINK_CONNECTING) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+    memcpy(espw_want_ssid, ssid, slen + 1U);
+    memcpy(espw_want_psk, psk, plen + 1U);
+    espw_want = 1U;
+    if (!tiku_process_post(&espw_runner, TIKU_WIRELESS_EVT_JOIN_START, NULL)) {
+        espw_want = 0U;
+        memset(espw_want_psk, 0, sizeof espw_want_psk);
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+    return TIKU_DRV_OK;
 }
 
 int tiku_wireless_connect(const char *ssid, const char *psk) {
@@ -388,10 +640,20 @@ int tiku_wireless_connect(const char *ssid, const char *psk) {
 }
 
 int tiku_wireless_disconnect(void) {
-    return TIKU_DRV_ERR_INVALID;
+    if (!espw_up) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    espw_want = 0U;                     /* a join not yet begun is dropped */
+    memset(espw_want_psk, 0, sizeof espw_want_psk);
+    return tiku_process_post(&espw_runner, TIKU_WIRELESS_EVT_DISCONNECT,
+                             NULL) ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
 }
 
+/* Nothing is kept across boots: forgetting is leaving. */
 int tiku_wireless_forget(void) {
+    if (espw_up) {
+        (void)tiku_wireless_disconnect();
+    }
     return TIKU_DRV_OK;
 }
 

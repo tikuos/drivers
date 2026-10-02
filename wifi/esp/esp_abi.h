@@ -198,21 +198,39 @@ typedef struct {
     int32_t _magic;
 } wifi_osi_funcs_t;
 
-/** @brief The supplicant's crypto, handed to the libraries at init (R3). */
+/** @brief The crypto the libraries call for themselves, handed over at init:
+ *         AES-128 is CBC over whole blocks, the wraps count 8-byte blocks of
+ *         key, and the CCMP calls return a buffer from the heap, or NULL. */
 typedef struct {
     uint32_t size;
     uint32_t version;
-    void *hmac_sha256_vector;
-    void *pbkdf2_sha1;
-    void *aes_128_encrypt;
-    void *aes_128_decrypt;
-    void *omac1_aes_128;
-    void *ccmp_decrypt;
-    void *ccmp_encrypt;
-    void *aes_gmac;
-    void *sha256_vector;
-    void *aes_wrap;
-    void *aes_unwrap;
+    int (*hmac_sha256_vector)(const unsigned char *key, int key_len,
+                              int num_elem, const unsigned char *addr[],
+                              const int *len, unsigned char *mac);
+    int (*pbkdf2_sha1)(const char *passphrase, const char *ssid,
+                       unsigned int ssid_len, int iterations,
+                       unsigned char *buf, unsigned int buflen);
+    int (*aes_128_encrypt)(const unsigned char *key, const unsigned char *iv,
+                           unsigned char *data, int data_len);
+    int (*aes_128_decrypt)(const unsigned char *key, const unsigned char *iv,
+                           unsigned char *data, int data_len);
+    int (*omac1_aes_128)(const uint8_t *key, const uint8_t *data,
+                         size_t data_len, uint8_t *mic);
+    uint8_t *(*ccmp_decrypt)(const uint8_t *tk, const uint8_t *hdr,
+                             const uint8_t *data, size_t data_len,
+                             size_t *decrypted_len, bool espnow_pkt);
+    uint8_t *(*ccmp_encrypt)(const uint8_t *tk, uint8_t *frame, size_t len,
+                             size_t hdrlen, uint8_t *pn, int keyid,
+                             size_t *encrypted_len);
+    int (*aes_gmac)(const uint8_t *key, size_t keylen, const uint8_t *iv,
+                    size_t iv_len, const uint8_t *aad, size_t aad_len,
+                    uint8_t *mic);
+    int (*sha256_vector)(size_t num_elem, const uint8_t *addr[],
+                         const size_t *len, uint8_t *buf);
+    int (*aes_wrap)(const unsigned char *kek, size_t kek_len, int n,
+                    const unsigned char *plain, unsigned char *cipher);
+    int (*aes_unwrap)(const unsigned char *kek, size_t kek_len, int n,
+                      const unsigned char *cipher, unsigned char *plain);
 } wpa_crypto_funcs_t;
 
 /** @brief esp_wifi_init_internal()'s argument: buffers, features, tables. */
@@ -518,6 +536,133 @@ _Static_assert(offsetof(wpa_funcs_t, wpa_sta_rx_mgmt) == 84, "wpa");
  *         unregister, through the adapter's free). */
 int esp_wifi_register_wpa_cb_internal(wpa_funcs_t *cb);
 int esp_wifi_unregister_wpa_cb_internal(void);
+
+/** @brief The station's configuration: the fields the driver sets, the
+ *         rest (PMF, SAE, HE, retry details) left zero. */
+typedef struct {
+    uint8_t  ssid[32];
+    uint8_t  password[64];
+    uint32_t scan_method;
+    bool     bssid_set;
+    uint8_t  bssid[6];
+    uint8_t  channel;
+    uint16_t listen_interval;
+    uint32_t sort_method;
+    struct {
+        int8_t   rssi;
+        uint32_t authmode;          /* the weakest the station accepts */
+        uint8_t  rssi_5g_adjustment;
+    } threshold;
+    struct {
+        bool capable;
+        bool required;
+    } pmf_cfg;
+    uint32_t features;              /* WIFI_STA_* bits */
+    uint8_t  rest[48];
+} wifi_sta_config_t;
+
+#define WIFI_ALL_CHANNEL_SCAN       1U      /* scan_method: every channel */
+#define WIFI_CONNECT_AP_BY_SIGNAL   0U      /* sort_method: strongest first */
+#define WIFI_STA_NO_WPA3_COMPAT     (1U << 6)   /* no RSN override elements */
+
+typedef union {
+    wifi_sta_config_t sta;
+    uint8_t           raw[184];
+} wifi_config_t;
+
+#define WIFI_AUTH_OPEN              0U
+#define WIFI_AUTH_WPA_PSK           2U
+#define WIFI_AUTH_WPA2_PSK          3U
+#define WIFI_AUTH_WPA_WPA2_PSK      4U
+#define WIFI_AUTH_WPA2_WPA3_PSK     7U
+
+typedef struct {
+    uint8_t  ssid[32];
+    uint8_t  ssid_len;
+    uint8_t  bssid[6];
+    uint8_t  channel;
+    uint32_t authmode;
+    uint16_t aid;
+} wifi_event_sta_connected_t;
+
+typedef struct {
+    uint8_t ssid[32];
+    uint8_t ssid_len;
+    uint8_t bssid[6];
+    uint8_t reason;
+    int8_t  rssi;
+} wifi_event_sta_disconnected_t;
+
+#if defined(__riscv) && __riscv_xlen == 32
+_Static_assert(sizeof(wifi_config_t) == 184, "station config size");
+_Static_assert(offsetof(wifi_sta_config_t, password) == 32, "sta");
+_Static_assert(offsetof(wifi_sta_config_t, scan_method) == 96, "sta");
+_Static_assert(offsetof(wifi_sta_config_t, listen_interval) == 108, "sta");
+_Static_assert(offsetof(wifi_sta_config_t, threshold) == 116, "sta");
+_Static_assert(offsetof(wifi_sta_config_t, pmf_cfg) == 128, "sta");
+_Static_assert(offsetof(wifi_sta_config_t, features) == 132, "sta");
+_Static_assert(sizeof(wifi_event_sta_connected_t) == 48, "connected size");
+_Static_assert(offsetof(wifi_event_sta_connected_t, authmode) == 40, "conn");
+_Static_assert(sizeof(wifi_event_sta_disconnected_t) == 41, "disc size");
+_Static_assert(offsetof(wifi_event_sta_disconnected_t, reason) == 39, "disc");
+#endif
+
+/** @brief libnet80211: configure, join and leave (IDF's esp_wifi_connect
+ *         and _disconnect wrap the two internal calls).  PMF is on unless
+ *         turned off after each configure: this supplicant does no BIP. */
+esp_err_t esp_wifi_set_config(wifi_interface_t interface, wifi_config_t *conf);
+esp_err_t esp_wifi_disable_pmf_config(wifi_interface_t interface);
+esp_err_t esp_wifi_connect_internal(void);
+esp_err_t esp_wifi_disconnect_internal(void);
+esp_err_t esp_wifi_sta_get_rssi(int *rssi);
+
+/* Disconnect reasons the driver tells apart. */
+#define WIFI_REASON_ASSOC_LEAVE     8U
+
+/* What the stack offers its supplicant: the profile being joined, the
+ * association's element, EAPOL out, keys in, and the handshake's end. */
+#define WIFI_APPIE_WPA              3U
+#define WIFI_APPIE_RSN              4U
+#define NONE_AUTH                   0x01U   /* the profile's auth mode */
+#define WPA2_AUTH_PSK               0x05U
+#define WIFI_WPA_ALG_TKIP           2
+#define WIFI_WPA_ALG_CCMP           3
+#define KEY_FLAG_RX                 (1 << 2)
+#define KEY_FLAG_TX                 (1 << 3)
+#define KEY_FLAG_GROUP              (1 << 4)
+#define KEY_FLAG_PAIRWISE           (1 << 5)
+
+struct wifi_ssid {
+    int     len;
+    uint8_t ssid[32];
+};
+
+/** @brief After an EAPOL frame left: its payload, and whether it failed. */
+typedef void (*eapol_txcb_t)(uint8_t *eapol, size_t len, bool tx_failure);
+
+esp_err_t esp_wifi_sta_connect_internal(const uint8_t *bssid);
+int esp_wifi_set_appie_internal(uint8_t type, uint8_t *ie, uint16_t len,
+                                uint8_t flag);
+int esp_wifi_unset_appie_internal(uint8_t type);
+int esp_wifi_internal_tx(wifi_interface_t wifi_if, void *buffer,
+                         uint16_t len);
+int esp_wifi_set_sta_key_internal(int alg, uint8_t *addr, int key_idx,
+                                  int set_tx, uint8_t *seq, size_t seq_len,
+                                  uint8_t *key, size_t key_len, int key_flag);
+bool esp_wifi_auth_done_internal(void);
+int esp_wifi_register_eapol_txdonecb_internal(eapol_txcb_t fn);
+uint8_t *esp_wifi_sta_get_ap_info_prof_pmk_internal(void);
+uint8_t *esp_wifi_sta_get_prof_password_internal(void);
+struct wifi_ssid *esp_wifi_sta_get_prof_ssid_internal(void);
+uint8_t esp_wifi_sta_get_reset_nvs_pmk_internal(void);
+uint8_t esp_wifi_sta_set_reset_nvs_pmk_internal(uint8_t reset_flag);
+int esp_wifi_sta_update_ap_info_internal(void);
+bool esp_wifi_sta_prof_is_rsn_internal(void);
+uint8_t esp_wifi_sta_get_prof_authmode_internal(void);
+int esp_wifi_get_macaddr_internal(uint8_t if_index, uint8_t *macaddr);
+void esp_wifi_deauthenticate_internal(uint8_t reason_code);
+uint8_t esp_wifi_sta_get_pairwise_cipher_internal(void);
+uint8_t esp_wifi_sta_get_group_cipher_internal(void);
 
 /** @brief The base the stack posts its events under (esp_glue.c). */
 extern const char *WIFI_EVENT;

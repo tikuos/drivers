@@ -79,6 +79,15 @@ int espw_wpa_register(void);
 /** @brief Take the supplicant back (the stack frees its table). */
 void espw_wpa_unregister(void);
 
+/** @brief The PMK of the network about to be joined, derived by the driver
+ *         from its passphrase; NULL wipes it. */
+void espw_wpa_set_pmk(const uint8_t *pmk);
+
+/* esp_crypto.c ------------------------------------------------------------*/
+
+/** @brief Fill the crypto table esp_wifi_init_internal() takes. */
+void espw_crypto_table(wpa_crypto_funcs_t *t);
+
 /* tiku_drv_wifi_esp.c -----------------------------------------------------*/
 
 /** @brief An event the libraries posted. */

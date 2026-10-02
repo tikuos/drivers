@@ -33,7 +33,14 @@ SRCS    += $(ESPW_DIR)/esp_osi.c
 SRCS    += $(ESPW_DIR)/esp_phy.c
 SRCS    += $(ESPW_DIR)/esp_heap.c
 SRCS    += $(ESPW_DIR)/esp_wpa.c
+SRCS    += $(ESPW_DIR)/esp_crypto.c
 SRCS    += $(ESPW_DIR)/esp_glue.c
+# The supplicant's and the libraries' crypto, from TikuKits (the crypto kit
+# may list them too: SRCS is de-duplicated).
+SRCS    += $(addprefix tikukits/crypto/, sha1/tiku_kits_crypto_sha1.c \
+             hmac/tiku_kits_crypto_hmac_sha1.c pbkdf2/tiku_kits_crypto_pbkdf2.c \
+             aes128/tiku_kits_crypto_aes128.c aeskw/tiku_kits_crypto_aeskw.c \
+             sha256/tiku_kits_crypto_sha256.c)
 CFLAGS  += -DTIKU_DRV_WIFI_ESP_ENABLE=1
 # esp_xip.ld joins the arch script's XIP fragments; the ROM scripts only name
 # addresses.  The libraries get their own group so their libc calls resolve

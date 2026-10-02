@@ -11,7 +11,7 @@ note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
 | R0 | Libraries link; their code runs from flash (XIP) | done: boot prints the PHY version from flash-resident code |
 | R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | done: `wifi on` calibrates in 66 ms, starts the station, reports the MAC |
 | R2 | Scan through `tiku_wireless` | done: `wifi scan` finds the APs around the bench (30-36 in 2.4 s) |
-| R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | pending |
+| R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | pending |
 | R5 | Radio off: sleep numbers unchanged | pending |
 | R6 | BLE | later |
@@ -57,9 +57,9 @@ of calling into it:
 [esp-wifi] xip.bin in flash is not this build's -- make flash writes both images
 ```
 
-The SRAM image is 207 KB (the libraries' `.iram1` code and data included)
-and `xip.bin` 365 KB.  BIG BASIC and the radio do not fit SRAM together
-yet.
+The SRAM image is 221 KB (the libraries' `.iram1` code and data, the
+supplicant and its crypto included) and `xip.bin` 381 KB.  BIG BASIC and
+the radio do not fit SRAM together yet.
 
 ## Using it
 
@@ -74,6 +74,10 @@ tikuOS:/> wifi on
 tikuOS:/> wifi scan
 [esp-wifi] *** scan done -- 30 APs in 2445 ms ***
 tikuOS:/> wifi list
+tikuOS:/> wifi connect "MyNetwork" mypassphrase
+[esp-wifi] *** LINK UP -- joined MyNetwork (channel 9) in 2507 ms ***
+tikuOS:/> wifi disconnect
+[esp-wifi] *** LINK DOWN -- left MyNetwork ***
 tikuOS:/> wifi off
 ```
 
@@ -88,9 +92,26 @@ sit in a small static pool so that the heap can empty.  `wifi status` and
 `wifi scan` scans every channel the country allows (the world-safe
 default, 1-11), and `wifi list` shows the 16 strongest of what it found.
 The stack consults a supplicant even to scan, for the RSN and WPA
-elements of each AP: `esp_wpa.c` is tikuOS's own, written from IEEE
-802.11, and joining comes with its handshake.  The country table in
-`esp_glue.c` is a hand-written handful of countries' 2.4 GHz rules.
+elements of each AP.  The country table in `esp_glue.c` is a hand-written
+handful of countries' 2.4 GHz rules.
+
+`wifi connect SSID PSK` joins the strongest AP of that name: a WPA2-PSK
+network, or an open one for an empty passphrase (`wifi connect SSID ""`).
+The passphrase becomes its PMK (PBKDF2, 4096 rounds) in the driver and is
+wiped; a failed join is tried three times in all, and a link that drops is
+rejoined the same way; `wifi disconnect` leaves for good.  `wifi status`
+and `/proc/wifi/` show the network, the AP's signal and the join time.
+
+The supplicant, `esp_wpa.c`, is tikuOS's own, written from IEEE
+802.11-2020 12.7 over TikuKits' HMAC-SHA1 and AES key wrap: the 4-way
+handshake, then group rekeys.  It joins WPA2-PSK with CCMP both ways and
+nothing else: no TKIP, no WPA3 (SAE), no PMF -- the driver turns PMF off
+for each join, and an AP that requires it is not joined.  The keys go to
+the radio only once message 4 has left, and never twice (no key
+reinstallation).  `TikuBench/tests/host/nonkernel/test_wpa.c` runs it
+against a scripted AP on the host (`make -C TikuBench/tests/host/nonkernel
+wpa`), the expected keys computed apart from it.  `esp_crypto.c` gives the
+libraries the crypto they call themselves; the PMF entries refuse.
 
 Bring-up tracing (every blocking wait, task and interrupt route) is
 compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
@@ -105,7 +126,9 @@ compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
 - `esp_phy.c` -- the modem's clocks, the PHY's bring-up and calibration,
   the MAC address
 - `esp_heap.c/.h` -- the libraries' heap and lock pool
-- `esp_wpa.c` -- the supplicant the stack calls: RSN/WPA element parsing
+- `esp_wpa.c` -- the supplicant the stack calls: RSN/WPA element parsing,
+  the WPA2-PSK handshakes, the keys to the radio
+- `esp_crypto.c` -- the crypto table the libraries call, over TikuKits
 - `esp_port.h` -- what those files share
 - `esp_abi.h` -- the libraries' ABI this driver uses, hand-written
 - `esp_glue.c` -- the symbols the libraries expect around them
