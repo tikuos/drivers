@@ -10,6 +10,10 @@ ifeq ($(TIKU_DRV_WIFI_ESP_ENABLE),1)
 ifneq ($(MCU),esp32c61)
 $(error wifi/esp: the Espressif radio libraries are built for MCU=esp32c61)
 endif
+ifneq ($(TIKU_THREADS_ENABLE),1)
+$(error wifi/esp: the radio's tasks are worker threads -- build with \
+TIKU_THREADS_ENABLE=1)
+endif
 ESPW_DIR     := drivers/wifi/esp
 ESPW_LIBS    := $(addprefix $(ESPW_DIR)/vendor/lib/, \
                   libnet80211.a libpp.a libcore.a libphy.a)
@@ -25,6 +29,9 @@ endif
 endif
 
 SRCS    += $(ESPW_DIR)/tiku_drv_wifi_esp.c
+SRCS    += $(ESPW_DIR)/esp_osi.c
+SRCS    += $(ESPW_DIR)/esp_phy.c
+SRCS    += $(ESPW_DIR)/esp_heap.c
 SRCS    += $(ESPW_DIR)/esp_glue.c
 CFLAGS  += -DTIKU_DRV_WIFI_ESP_ENABLE=1
 # esp_xip.ld joins the arch script's XIP fragments; the ROM scripts only name

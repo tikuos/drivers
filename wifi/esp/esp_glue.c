@@ -59,6 +59,33 @@ int phy_printf(const char *fmt, ...) {
     return n;
 }
 
+/* Their stdio: straight to the console, not newlib's, whose files go
+ * nowhere here. */
+int putchar(int c) {
+    TIKU_PRINTF("%c", c);
+    return c;
+}
+
+int puts(const char *s) {
+    TIKU_PRINTF("%s\n", s);
+    return 0;
+}
+
+/* An assertion or an abort in a library is fatal: say so, then fault, so
+ * the kernel's dump shows where. */
+void __assert_func(const char *file, int line, const char *func,
+                   const char *expr) {
+    TIKU_PRINTF("[esp-wifi] assert %s at %s:%d (%s)\n", expr, file, line,
+                func != NULL ? func : "?");
+    __builtin_trap();
+}
+
+void abort(void) {
+    TIKU_PRINTF("[esp-wifi] abort from 0x%08lx\n",
+                (unsigned long)(uintptr_t)__builtin_return_address(0));
+    __builtin_trap();
+}
+
 /** @brief The crystal, in MHz: the DevKitC's is 40. */
 uint32_t rtc_clk_xtal_freq_get(void) {
     return 40U;
@@ -98,7 +125,7 @@ int mesh_sta_auth_expire_time(void) {
     return 0;
 }
 
-/* Regulatory domains: filled when scanning needs them (R2). */
+/* Regulatory domains: filled when scanning needs them. */
 uint8_t regdomain_table[256];
 uint8_t regulatory_data[1024];
 

@@ -9,7 +9,7 @@ note, milestones and decisions live in `kintsugi/esp32c61-radio-plan.md`.
 | Milestone | Deliverable | State |
 |-----------|-------------|-------|
 | R0 | Libraries link; their code runs from flash (XIP) | done: boot prints the PHY version from flash-resident code |
-| R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | pending |
+| R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | done: `wifi on` calibrates in 66 ms, starts the station, reports the MAC |
 | R2 | Scan through `tiku_wireless` | pending |
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | pending |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | pending |
@@ -38,9 +38,11 @@ missing.
 
 ## Build and flash
 
+The radio's tasks run as worker threads, so the build needs them:
+
 ```
-make MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
-make flash MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
+make MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
+make flash MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_ESP_ENABLE=1
 ```
 
 The libraries' code is too large for the 320 KB SRAM the kernel runs from,
@@ -55,13 +57,46 @@ of calling into it:
 [esp-wifi] xip.bin in flash is not this build's -- make flash writes both images
 ```
 
-At R0 the image is 143 KB of SRAM image plus 299 KB in flash; the
-libraries add about 25 KB of code (`.iram1`) and 15 KB of data to SRAM.
-BIG BASIC and the radio do not fit SRAM together yet.
+The SRAM image is 207 KB (the libraries' `.iram1` code and data included)
+and `xip.bin` 365 KB.  BIG BASIC and the radio do not fit SRAM together
+yet.
+
+## Using it
+
+The radio is off until asked, and costs nothing while off:
+
+```
+tikuOS:/> wifi on
+[esp-wifi] station started
+[esp-wifi] RF calibrated: 0 in 66 ms
+[esp-wifi] up: MAC 30:ed:a0:e7:ee:d4
+[esp-wifi] heap: 30176 of 57344 bytes in use, 30432 at most
+tikuOS:/> wifi status
+tikuOS:/> wifi off
+```
+
+`wifi on` takes 56 KB from the SRAM tier for the libraries' heap, starts a
+timer thread and the libraries' own task (two worker slots), calibrates the
+RF the first time (later starts wake the PHY from what it kept), and starts
+the station.  `wifi off` stops it all and gives the heap back once it is
+empty.  The libraries keep a few locks from one start to the next; those
+sit in a small static pool so that the heap can empty.  `wifi status` and
+`/proc/wifi/` show the state, the MAC and the radio's interrupts.
+
+Bring-up tracing (every blocking wait, task and interrupt route) is
+compiled in with `EXTRA_CFLAGS=-DESPW_TRACE=1`.
 
 ## Files
 
-- `tiku_drv_wifi_esp.c/.h` -- the driver descriptor and the XIP check
+- `tiku_drv_wifi_esp.c/.h` -- the driver descriptor, the XIP check, the
+  radio's on/off and the `tiku_wireless` interface
+- `esp_osi.c` -- the OS the libraries run on: locks and queues over kernel
+  wait queues, tasks as worker threads, timers on SYSTIMER's driver alarm,
+  their interrupt lines on the radio's CLIC lines
+- `esp_phy.c` -- the modem's clocks, the PHY's bring-up and calibration,
+  the MAC address
+- `esp_heap.c/.h` -- the libraries' heap and lock pool
+- `esp_port.h` -- what those files share
 - `esp_abi.h` -- the libraries' ABI this driver uses, hand-written
 - `esp_glue.c` -- the symbols the libraries expect around them
 - `esp_xip.ld` -- the fragment placing the libraries in the XIP window
