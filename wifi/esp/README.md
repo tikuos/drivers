@@ -15,7 +15,7 @@ The design notes, milestones and decisions live in
 | R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS builds and runs to the network with code in flash and buffers in PSRAM -- live sites wait on an open network |
 | R5 | Radio off: sleep numbers unchanged | pending |
-| R6 | BLE: the LE controller under tikuOS's own host stack | in part: `bt on` brings the controller up (HCI Reset, version, address through the host), `bt scan` finds the advertisers around the bench, `bt advertise` runs; TikuBench bt 114/114 on the C61; connections need a second device, then Wi-Fi and BLE together |
+| R6 | BLE: the LE controller under tikuOS's own host stack | in part: `bt on` brings the controller up (HCI Reset, version, address through the host), `bt scan` finds the advertisers around the bench, `bt advertise` runs; TikuBench bt 114/114 on the C61; Wi-Fi and BLE run together through Espressif's coexistence arbiter; connections need a second device |
 
 ## Fetching the libraries
 
@@ -32,6 +32,7 @@ sh drivers/wifi/esp/fetch.sh
 | libnet80211.a, libpp.a, libcore.a | espressif/esp32-wifi-lib @ af55a0c, esp32c61/ | Apache-2.0 |
 | libphy.a, libbtbb.a | espressif/esp-phy-lib @ 20f1db0, esp32c61/ | Apache-2.0 |
 | libble_app.a | espressif/esp32c6-bt-lib @ a00f2d0, esp32c61/ | Apache-2.0 |
+| libcoexist.a | espressif/esp-coex-lib @ c758e7b, esp32c61/ | Apache-2.0 |
 | esp32c61.rom{,.api,.coexist,.net80211,.pp,.phy,.version}.ld | espressif/esp-idf @ 4d59230, components/esp_rom/esp32c61/ld | Apache-2.0 |
 
 The ROM scripts only name addresses in the chip's ROM, where much of the
@@ -48,8 +49,8 @@ make flash MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_
 ```
 
 BLE, with `TIKU_DRV_BLE_ESP_ENABLE=1` in place of (or beside) the Wi-Fi
-flag.  Both together need `TIKU_ESP32C61_XIP_CODE=1` to fit SRAM, and run
-one at a time until coexistence lands.
+flag.  Both together need `TIKU_ESP32C61_XIP_CODE=1` to fit SRAM, and then
+share one heap and Espressif's coexistence arbiter (see Coexistence).
 
 For IP over the radio add the lean net stack (TikuBench's wifi firmware for
 this board builds the same):
@@ -194,6 +195,25 @@ its task finish before each command (it frees a command's buffer only
 after the reply).  `bt status` shows the heap and the radio's interrupts.
 `EXTRA_CFLAGS=-DESPB_TRACE=1` traces every HCI command, event and receive.
 
+## Coexistence
+
+With both radios built, Espressif's arbiter -- `libcoexist.a`, most of it
+in the C61's ROM -- grants the one RF front end to one stack at a time.
+`esp_coex.c` registers its adapter (semaphores, timers and heap, all from
+the shim) once per boot as the first radio comes up; Wi-Fi reaches it
+through its OS table, BLE through its coexistence hooks.  The arbiter
+allocates its 56-byte function table once and the ROM keeps the pointer, so
+that comes from a static pool and the heap can still empty.
+
+The two radios share one SRAM heap, 60 KB
+(`TIKU_DRV_ESP_COEX_HEAP_BYTES`), taken by the first radio up and given
+back after the last down.  Wi-Fi's packet buffers come from a 96 KB block
+of PSRAM instead (`TIKU_DRV_WIFI_ESP_PSRAM_BYTES`, 0 in a Wi-Fi-only
+build), as IDF's SPIRAM_TRY_ALLOCATE_WIFI_LWIP places them; PSRAM comes up
+on demand.  Joined to an AP with BLE scanning or advertising, pings come
+back 4 of 4; the shared heap peaked at 48 KB, and both orders of `off`
+give it all back.
+
 ## Files
 
 - `tiku_drv_wifi_esp.c/.h` -- the driver descriptor, the XIP check, the
@@ -203,19 +223,23 @@ after the reply).  `bt status` shows the heap and the radio's interrupts.
 - `esp_npl.c`, `esp_mempool.c`, `esp_ble.h` -- the controller's OS layer
   and memory pools
 - `esp_ble_abi.h` -- the controller library's ABI, hand-written
-- `esp_core.c` -- what both radios stand on: heap, modem gating, timers
+- `esp_core.c` -- what both radios stand on: heap, modem gating, timers,
+  the arbiter
+- `esp_coex.c`, `esp_coex_abi.h` -- coexistence: the arbiter's adapter, and
+  its library's ABI, hand-written
 - `esp_osi.c` -- the OS the libraries run on: locks and queues over kernel
   wait queues, tasks as worker threads, timers on SYSTIMER's driver alarm,
   their interrupt lines on the radio's CLIC lines
 - `esp_phy.c` -- the modem's clocks, the PHY's bring-up and calibration,
   the MAC address
-- `esp_heap.c/.h` -- the libraries' heap and lock pool
+- `esp_heap.c/.h` -- the libraries' heap (SRAM, and the PSRAM block
+  packet buffers prefer) and lock pool
 - `esp_wpa.c` -- the supplicant the stack calls: RSN/WPA element parsing,
   the WPA2-PSK handshakes, the keys to the radio
 - `esp_crypto.c` -- the crypto table the libraries call, over TikuKits
 - `esp_port.h` -- what those files share
 - `esp_abi.h` -- the libraries' ABI this driver uses, hand-written
 - `esp_glue.c` -- the symbols the libraries expect around them
-- `esp_xip.ld`, `esp_wifi_xip.ld`, `esp_ble_xip.ld` -- the fragments
-  placing the libraries in the XIP window
+- `esp_xip.ld`, `esp_wifi_xip.ld`, `esp_ble_xip.ld`, `esp_coex_xip.ld` --
+  the fragments placing the libraries in the XIP window
 - `fetch.sh`, `SHA256SUMS` -- download and verification

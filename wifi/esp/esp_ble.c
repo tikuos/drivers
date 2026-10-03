@@ -34,6 +34,7 @@
 
 #include "esp_ble.h"
 #include "esp_ble_abi.h"
+#include "esp_coex_abi.h"
 #include "esp_heap.h"
 #include "esp_port.h"
 #include "tiku_drv_ble_esp.h"
@@ -215,9 +216,23 @@ static espb_ext_funcs_t espb_ext = {
     .magic = ESPB_EXT_MAGIC,
 };
 
-static void espb_coex_bits(uint32_t type, uint32_t status) {
+/* The arbiter's scheme bits: forwarded with Wi-Fi built too, else idle. */
+static void espb_coex_set(uint32_t type, uint32_t status) {
+#if ESPW_COEX
+    coex_schm_status_bit_set(type, status);
+#else
     (void)type;
     (void)status;
+#endif
+}
+
+static void espb_coex_clear(uint32_t type, uint32_t status) {
+#if ESPW_COEX
+    coex_schm_status_bit_clear(type, status);
+#else
+    (void)type;
+    (void)status;
+#endif
 }
 
 static espb_coex_funcs_t espb_coex = {
@@ -225,8 +240,8 @@ static espb_coex_funcs_t espb_coex = {
     ._version = ESPB_COEX_VERSION,
     ._coex_wifi_sleep_set = NULL,
     ._coex_core_ble_conn_dyn_prio_get = NULL,
-    ._coex_schm_status_bit_set = espb_coex_bits,
-    ._coex_schm_status_bit_clear = espb_coex_bits,
+    ._coex_schm_status_bit_set = espb_coex_set,
+    ._coex_schm_status_bit_clear = espb_coex_clear,
 };
 
 /** @brief IDF's default controller configuration for the C61 (controller
@@ -586,6 +601,9 @@ static void espb_teardown(int stage) {
         espb_up = 0U;
         (void)r_ble_controller_disable();
         espb_stack_disable();
+#if ESPW_COEX
+        coex_disable();
+#endif
         espw_phy_bt_disable();
         tiku_esp32c61_sleep_hold(0);
     }
@@ -626,7 +644,7 @@ static int espb_power_up(void) {
     uint8_t mac[6], le[6];
     int rc;
 
-    if (espw_core_up(ESPW_RADIO_BLE, TIKU_DRV_BLE_ESP_HEAP_BYTES) != 0) {
+    if (espw_core_up(ESPW_RADIO_BLE, TIKU_DRV_BLE_ESP_HEAP_BYTES, 0U) != 0) {
         return TIKU_DRV_ERR_INIT;
     }
     rx_ring = espw_malloc(ESPB_RX_BYTES);
@@ -656,6 +674,9 @@ static int espb_power_up(void) {
     if (rc != 0) {
         return espb_fail(STAGE_MODEM, "coex funcs", rc);
     }
+#if ESPW_COEX
+    (void)coex_init();
+#endif
     rc = esp_ble_register_bb_funcs();
     if (rc != 0) {
         return espb_fail(STAGE_MODEM, "baseband funcs", rc);
@@ -694,6 +715,9 @@ static int espb_power_up(void) {
     espw_phy_bt_enable();
     tiku_esp32c61_sleep_hold(1);
     bt_bb_v2_init_cmplx(1U);
+#if ESPW_COEX
+    (void)coex_enable();
+#endif
     esp_ble_controller_flash_only_param_config();
     rc = espb_stack_enable();
     if (rc == 0) {

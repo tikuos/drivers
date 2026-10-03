@@ -1,10 +1,10 @@
 /*
  * Tiku Drivers - ESP32-C61 radios, what both stand on
  *
- * The heap the libraries allocate from, the modem's clock gating and the OS
- * adapter's timer service come up with a radio and go down after it.  Wi-Fi
- * and BLE together need the coexistence arbiter, not here yet: until then
- * one radio at a time, and the second is told so.
+ * The heap the libraries allocate from, the modem's clock gating, the OS
+ * adapter's timer service and, with both radios built, the coexistence
+ * arbiter come up with the first radio and go down after the last.  With
+ * both, one SRAM heap serves the two, sized for them at once.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -12,26 +12,61 @@
 #include <stdint.h>
 
 #include <kernel/memory/tiku_mem.h>
+#include <arch/esp32c61/tiku_psram_arch.h>
 #include "esp_heap.h"
 #include "esp_port.h"
 
 static uint8_t      core_radios;
 static uint8_t      core_heap_taken;
+static uint8_t      core_ext_taken;
 static tiku_arena_t core_heap_arena;
+static tiku_arena_t core_ext_arena;
+
+/* Both radios at once: Wi-Fi, its packet buffers in PSRAM, peaks at 22 KB of
+ * SRAM, BLE at 33 KB. */
+#ifndef TIKU_DRV_ESP_COEX_HEAP_BYTES
+#define TIKU_DRV_ESP_COEX_HEAP_BYTES (60U * 1024U)
+#endif
 
 static const char *core_name(uint8_t radio) {
     return radio == ESPW_RADIO_BLE ? "BLE" : "Wi-Fi";
 }
 
-int espw_core_up(uint8_t radio, uint32_t heap_bytes) {
+/** @brief Packet buffers' block from the PSRAM tier, bringing PSRAM up if
+ *         it is not yet; without it they come from SRAM, as before. */
+static void core_ext_take(uint32_t bytes) {
+    tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
+
+    if (tiku_esp32c61_psram_attach() != TIKU_ESP32C61_PSRAM_OK) {
+        TIKU_PRINTF("[esp] no PSRAM: packet buffers come from SRAM\n");
+        return;
+    }
+    req.alignment = 8U;
+    req.allocation_class = TIKU_MEM_TRANSIENT;
+    if (tiku_tier_arena_create_opts(&core_ext_arena, TIKU_MEM_PSRAM, bytes, 0U,
+                                    &req) != TIKU_MEM_OK) {
+        TIKU_PRINTF("[esp] no %lu KB in the PSRAM tier: packet buffers come "
+                    "from SRAM\n", (unsigned long)(bytes / 1024U));
+        return;
+    }
+    espw_heap_ext_init(core_ext_arena.buf, core_ext_arena.capacity);
+    core_ext_taken = 1U;
+}
+
+int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
 
     if (core_radios != 0U) {
-        TIKU_PRINTF("[esp] %s is up: turn it off first -- Wi-Fi and BLE "
-                    "together need coexistence, not here yet\n",
-                    core_name(core_radios));
-        return -1;
+        /* The other radio is up: everything below stands already. */
+        if (ext_bytes != 0U && !core_ext_taken) {
+            core_ext_take(ext_bytes);
+        }
+        core_radios |= radio;
+        return 0;
     }
+#if ESPW_COEX
+    heap_bytes = TIKU_DRV_ESP_COEX_HEAP_BYTES;
+#endif
     if (!core_heap_taken) {
         req.alignment = 8U;
         req.allocation_class = TIKU_MEM_TRANSIENT;
@@ -45,12 +80,18 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes) {
         espw_heap_init(core_heap_arena.buf, core_heap_arena.capacity);
         core_heap_taken = 1U;
     }
+    if (ext_bytes != 0U && !core_ext_taken) {
+        core_ext_take(ext_bytes);
+    }
     espw_modem_init();
     if (espw_osi_start() != 0) {
         core_radios = radio;
         espw_core_down(radio);
         return -1;
     }
+#if ESPW_COEX
+    espw_coex_start();
+#endif
     core_radios = radio;
     return 0;
 }
@@ -70,6 +111,14 @@ void espw_core_down(uint8_t radio) {
     } else {
         TIKU_PRINTF("[esp] heap kept: %lu bytes still in use\n",
                     (unsigned long)espw_heap_used());
+    }
+    if (core_ext_taken && ended && espw_heap_ext_used() == 0U) {
+        espw_heap_ext_reset();
+        (void)tiku_mem_workspace_close(&core_ext_arena);
+        core_ext_taken = 0U;
+    } else if (core_ext_taken) {
+        TIKU_PRINTF("[esp] PSRAM heap kept: %lu bytes still in use\n",
+                    (unsigned long)espw_heap_ext_used());
     }
 }
 

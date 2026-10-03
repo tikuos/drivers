@@ -29,17 +29,26 @@
 #define ESPW_RADIO_WIFI     (1U << 0)
 #define ESPW_RADIO_BLE      (1U << 1)
 
+/* Both radios built: they may run at once, under the coexistence arbiter. */
+#define ESPW_COEX   ((TIKU_DRV_WIFI_ESP_ENABLE + 0) && \
+                     (TIKU_DRV_BLE_ESP_ENABLE + 0))
+
 /**
- * @brief What a radio stands on: the libraries' heap (@p heap_bytes from the
- *        SRAM tier, or what an earlier start kept), the modem's gating and
- *        the timer service.  One radio at a time until coexistence lands.
- *        Kernel thread only.  @return 0, or -1 (said why)
+ * @brief What a radio stands on, brought up with the first: the libraries'
+ *        SRAM heap (@p heap_bytes, or one shared size with both radios
+ *        built), the modem's gating, the timer service, the arbiter; and
+ *        @p ext_bytes of PSRAM for packet buffers (0: none).  Kernel thread
+ *        only.  @return 0, or -1 (said why)
  */
-int espw_core_up(uint8_t radio, uint32_t heap_bytes);
+int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes);
 
 /** @brief The radio is down: the last one stops the timer service and gives
  *         the heap back if nothing is left in it. */
 void espw_core_down(uint8_t radio);
+
+/** @brief The arbiter's adapter registered and pre-initialised, once per
+ *         boot (esp_coex.c; both radios built). */
+void espw_coex_start(void);
 
 /** @brief The radios up now (ESPW_RADIO_*). */
 uint8_t espw_core_radios(void);

@@ -2,10 +2,11 @@
  * Tiku Drivers - ESP32-C61 radio libraries, their heap
  *
  * The libraries allocate and free at will; tikuOS has no malloc.  This is a
- * first-fit heap over one block the driver takes from the SRAM tier when the
- * radio comes up, and gives back once the radio is down and the heap empty.
- * Their locks, which they keep from one start to the next, sit apart in a
- * small static pool so that the heap can empty.
+ * first-fit heap over blocks the core takes from the SRAM tier when a radio
+ * comes up (and, for Wi-Fi's packet buffers, one from the PSRAM tier), given
+ * back once the radios are down and the heap empty.  Their locks, which they
+ * keep from one start to the next, sit apart in a small static pool so that
+ * the heap can empty.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -28,6 +29,15 @@ typedef struct {
 /** @brief Take @p len bytes at @p base, 8-byte aligned, as the heap. */
 void espw_heap_init(void *base, uint32_t len);
 
+/** @brief Add a second SRAM block (a second radio's). @return 0, or -1 */
+int espw_heap_grow(void *base, uint32_t len);
+
+/** @brief Take PSRAM bytes as the region packet buffers prefer; reset it;
+ *         what is in use there; its figures. */
+void espw_heap_ext_init(void *base, uint32_t len);
+void espw_heap_ext_reset(void);
+uint32_t espw_heap_ext_used(void);
+
 /** @brief Forget the heap: its memory goes back, nothing may be freed
  *         into it after. */
 void espw_heap_reset(void);
@@ -35,20 +45,27 @@ void espw_heap_reset(void);
 /** @brief Bytes in use now. */
 uint32_t espw_heap_used(void);
 
-/** @brief @p n bytes, 8-byte aligned, or NULL.  Safe from an ISR. */
+/** @brief @p n bytes of SRAM, 8-byte aligned, or NULL.  Safe from an ISR. */
 void *espw_malloc(size_t n);
 
 /** @brief As espw_malloc(), zeroed. */
 void *espw_calloc(size_t count, size_t n);
 
-/** @brief Grow or shrink @p p to @p n bytes, moving it if need be. */
+/** @brief Grow or shrink @p p to @p n bytes, moving it (into SRAM) if need
+ *         be. */
 void *espw_realloc(void *p, size_t n);
+
+/** @brief The same, from PSRAM first and SRAM after: packet buffers. */
+void *espw_malloc_ext(size_t n);
+void *espw_calloc_ext(size_t count, size_t n);
+void *espw_realloc_ext(void *p, size_t n);
 
 /** @brief Give @p p back; NULL is ignored. */
 void espw_free(void *p);
 
-/** @brief The figures above. @param out  Filled */
+/** @brief The figures above, for SRAM or for PSRAM. @param out  Filled */
 void espw_heap_stats(espw_heap_stats_t *out);
+void espw_heap_ext_stats(espw_heap_stats_t *out);
 
 /** @brief A small object (a lock) from the static pool, zeroed; from the
  *         heap when larger or the pool is full. */

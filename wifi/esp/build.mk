@@ -23,6 +23,10 @@ endif
 ifeq ($(TIKU_DRV_BLE_ESP_ENABLE),1)
 ESPW_LIBS    += libble_app.a libbtbb.a
 endif
+ESPW_COEX    := $(and $(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE)),$(filter 1,$(TIKU_DRV_BLE_ESP_ENABLE)))
+ifneq ($(ESPW_COEX),)
+ESPW_LIBS    += libcoexist.a
+endif
 ESPW_LIBS    := $(addprefix $(ESPW_DIR)/vendor/lib/,$(ESPW_LIBS))
 ESPW_ROMLDS  := $(addprefix $(ESPW_DIR)/vendor/rom/esp32c61.rom, \
                   .ld .api.ld .coexist.ld .net80211.ld .pp.ld .phy.ld .version.ld)
@@ -66,6 +70,12 @@ SRCS    += $(ESPW_DIR)/esp_mempool.c
 SRCS    += tikukits/crypto/p256/tiku_kits_crypto_p256.c
 CFLAGS  += -DTIKU_DRV_BLE_ESP_ENABLE=1
 TIKU_XIP_LDS += $(ESPW_DIR)/esp_ble_xip.ld
+endif
+
+# Both radios: the coexistence arbiter between them (most of it in ROM).
+ifneq ($(ESPW_COEX),)
+SRCS    += $(ESPW_DIR)/esp_coex.c
+TIKU_XIP_LDS += $(ESPW_DIR)/esp_coex_xip.ld
 endif
 
 # The ROM scripts only name addresses.  The libraries get their own group

@@ -30,6 +30,9 @@
 
 #include "esp_heap.h"
 #include "esp_port.h"
+#if ESPW_COEX
+#include "esp_coex_abi.h"
+#endif
 
 /* The libraries count time in their own ticks: here, milliseconds. */
 #define OSI_MAX_PRIORITY    25
@@ -924,6 +927,11 @@ static void *osi_malloc(size_t n) {
     return espw_malloc(n);
 }
 
+/* Packet buffers: PSRAM first when the core has some, SRAM after. */
+static void *osi_zalloc_ext(size_t n) {
+    return espw_calloc_ext(1U, n);
+}
+
 static void *osi_zalloc(size_t n) {
     return espw_calloc(1U, n);
 }
@@ -1037,9 +1045,11 @@ static bool osi_false(void) {
 static void osi_nothing(void) {
 }
 
+#if !ESPW_COEX
 static int osi_zero(void) {
     return 0;
 }
+#endif
 
 static int32_t osi_one(void) {
     return 1;
@@ -1113,6 +1123,26 @@ static int osi_nvs_erase_key(uint32_t h, const char *k) {
     return ESP_FAIL;
 }
 
+#if ESPW_COEX
+/* Coexistence: both radios built, so the arbiter answers (esp_coex.c). */
+static int osi_coex_init(void) {
+    return (int)coex_init();
+}
+
+static int osi_coex_enable(void) {
+    return (int)coex_enable();
+}
+
+static uint32_t osi_coex_status(void) {
+    return coex_status_get(ESPW_COEX_ST_WIFI);
+}
+
+static int osi_coex_register_cb(int type, int (*cb)(int)) {
+    return coex_schm_register_callback(type, (void *)cb);
+}
+
+#define OSI_COEX(stub, arbiter) arbiter
+#else
 /* Coexistence: Wi-Fi alone, so every request is granted at once. */
 static int osi_coex_request(uint32_t event, uint32_t latency,
                             uint32_t duration) {
@@ -1167,6 +1197,9 @@ static int osi_coex_start_cb(int (*cb)(void)) {
     return 0;
 }
 
+#define OSI_COEX(stub, arbiter) stub
+#endif
+
 static int osi_coex_period_set(uint8_t period) {
     (void)period;
     return 0;
@@ -1176,6 +1209,7 @@ static uint8_t osi_coex_period_get(void) {
     return 1U;
 }
 
+#if !ESPW_COEX
 static void *osi_coex_phase(int idx) {
     (void)idx;
     return NULL;
@@ -1184,6 +1218,7 @@ static void *osi_coex_phase(int idx) {
 static void *osi_null(void) {
     return NULL;
 }
+#endif
 
 /* Sleep retention: the modem is never powered down under the radio. */
 static void osi_regdma_set(void *link, uint32_t v, uint32_t mask) {
@@ -1286,37 +1321,48 @@ wifi_osi_funcs_t espw_osi_funcs = {
     ._realloc_internal = espw_realloc,
     ._calloc_internal = espw_calloc,
     ._zalloc_internal = osi_zalloc,
-    ._wifi_malloc = osi_malloc,
-    ._wifi_realloc = espw_realloc,
-    ._wifi_calloc = espw_calloc,
-    ._wifi_zalloc = osi_zalloc,
+    ._wifi_malloc = espw_malloc_ext,
+    ._wifi_realloc = espw_realloc_ext,
+    ._wifi_calloc = espw_calloc_ext,
+    ._wifi_zalloc = osi_zalloc_ext,
     ._wifi_create_queue = osi_wifi_create_queue,
     ._wifi_delete_queue = osi_wifi_delete_queue,
-    ._coex_init = osi_zero,
-    ._coex_deinit = osi_nothing,
-    ._coex_enable = osi_zero,
-    ._coex_disable = osi_nothing,
-    ._coex_status_get = osi_coex_u32,
+    ._coex_init = OSI_COEX(osi_zero, osi_coex_init),
+    ._coex_deinit = OSI_COEX(osi_nothing, coex_deinit),
+    ._coex_enable = OSI_COEX(osi_zero, osi_coex_enable),
+    ._coex_disable = OSI_COEX(osi_nothing, coex_disable),
+    ._coex_status_get = OSI_COEX(osi_coex_u32, osi_coex_status),
     ._coex_condition_set = NULL,
-    ._coex_wifi_request = osi_coex_request,
-    ._coex_wifi_release = osi_coex_release,
-    ._coex_wifi_channel_set = osi_coex_channel_set,
-    ._coex_event_duration_get = osi_coex_duration_get,
-    ._coex_pti_get = osi_coex_pti_get,
-    ._coex_schm_status_bit_clear = osi_coex_status_bits,
-    ._coex_schm_status_bit_set = osi_coex_status_bits,
-    ._coex_schm_interval_set = osi_coex_interval_set,
-    ._coex_schm_interval_get = osi_coex_u32,
-    ._coex_schm_curr_period_get = osi_coex_u8,
-    ._coex_schm_curr_phase_get = osi_null,
-    ._coex_schm_process_restart = osi_zero,
+    ._coex_wifi_request = OSI_COEX(osi_coex_request, coex_wifi_request),
+    ._coex_wifi_release = OSI_COEX(osi_coex_release, coex_wifi_release),
+    ._coex_wifi_channel_set = OSI_COEX(osi_coex_channel_set,
+                                       coex_wifi_channel_set),
+    ._coex_event_duration_get = OSI_COEX(osi_coex_duration_get,
+                                         coex_event_duration_get),
+    ._coex_pti_get = OSI_COEX(osi_coex_pti_get, coex_pti_get),
+    ._coex_schm_status_bit_clear = OSI_COEX(osi_coex_status_bits,
+                                            coex_schm_status_bit_clear),
+    ._coex_schm_status_bit_set = OSI_COEX(osi_coex_status_bits,
+                                          coex_schm_status_bit_set),
+    ._coex_schm_interval_set = OSI_COEX(osi_coex_interval_set,
+                                        coex_schm_interval_set),
+    ._coex_schm_interval_get = OSI_COEX(osi_coex_u32,
+                                        coex_schm_interval_get),
+    ._coex_schm_curr_period_get = OSI_COEX(osi_coex_u8,
+                                           coex_schm_curr_period_get),
+    ._coex_schm_curr_phase_get = OSI_COEX(osi_null,
+                                          coex_schm_curr_phase_get),
+    ._coex_schm_process_restart = OSI_COEX(osi_zero,
+                                           coex_schm_process_restart),
     ._coex_schm_register_cb = osi_coex_register_cb,
-    ._coex_register_start_cb = osi_coex_start_cb,
+    ._coex_register_start_cb = OSI_COEX(osi_coex_start_cb,
+                                        coex_register_start_cb),
     ._regdma_link_set_write_wait_content = osi_regdma_set,
     ._sleep_retention_find_link_by_id = osi_retention_link,
     ._coex_schm_flexible_period_set = osi_coex_period_set,
     ._coex_schm_flexible_period_get = osi_coex_period_get,
-    ._coex_schm_get_phase_by_idx = osi_coex_phase,
+    ._coex_schm_get_phase_by_idx = OSI_COEX(osi_coex_phase,
+                                            coex_schm_get_phase_by_idx),
     ._wifi_disable_ac_ax = osi_false,
     ._wifi_bb_sleep_retention_attach = osi_one,
     ._wifi_bb_sleep_retention_detach = osi_one,

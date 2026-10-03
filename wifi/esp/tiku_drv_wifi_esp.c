@@ -50,6 +50,17 @@
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (48U * 1024U)
 #endif
 
+/* A PSRAM block the libraries' packet buffers prefer (their _wifi_malloc
+ * family), as IDF's SPIRAM_TRY_ALLOCATE_WIFI_LWIP; 0: all in SRAM.  With
+ * BLE built too it is on: the two radios' SRAM must fit one heap. */
+#ifndef TIKU_DRV_WIFI_ESP_PSRAM_BYTES
+#if ESPW_COEX
+#define TIKU_DRV_WIFI_ESP_PSRAM_BYTES (96U * 1024U)
+#else
+#define TIKU_DRV_WIFI_ESP_PSRAM_BYTES 0U
+#endif
+#endif
+
 /* What the link must carry whole: the stack's entry points and all they
  * reach. */
 __attribute__((section(".xip.roots"), used))
@@ -508,6 +519,18 @@ static void espw_teardown(int stage) {
     espw_core_down(ESPW_RADIO_WIFI);
 }
 
+/** @brief The PSRAM region's use, when the core gave the radio one. */
+static void espw_report_ext(const char *what) {
+    espw_heap_stats_t x;
+
+    espw_heap_ext_stats(&x);
+    if (x.size != 0U) {
+        ESPW_PRINTF("%s %lu of %lu bytes in use, %lu at most\n", what,
+                    (unsigned long)(x.size - x.free), (unsigned long)x.size,
+                    (unsigned long)(x.size - x.low));
+    }
+}
+
 static int espw_power_up(void) {
     wifi_init_config_t cfg;
     espw_heap_stats_t st;
@@ -515,7 +538,8 @@ static int espw_power_up(void) {
     uint32_t cal_us;
     int fresh;
 
-    if (espw_core_up(ESPW_RADIO_WIFI, TIKU_DRV_WIFI_ESP_HEAP_BYTES) != 0) {
+    if (espw_core_up(ESPW_RADIO_WIFI, TIKU_DRV_WIFI_ESP_HEAP_BYTES,
+                     TIKU_DRV_WIFI_ESP_PSRAM_BYTES) != 0) {
         return TIKU_DRV_ERR_INIT;
     }
 
@@ -554,6 +578,7 @@ static int espw_power_up(void) {
     ESPW_PRINTF("up: MAC %02x:%02x:%02x:%02x:%02x:%02x\n", espw_mac[0],
                 espw_mac[1], espw_mac[2], espw_mac[3], espw_mac[4],
                 espw_mac[5]);
+    espw_report_ext("PSRAM heap:");
     ESPW_PRINTF("heap: %lu of %lu bytes in use, %lu at most\n",
                 (unsigned long)(st.size - st.free), (unsigned long)st.size,
                 (unsigned long)(st.size - st.low));
@@ -577,6 +602,7 @@ static int espw_power_down(void) {
     espw_scanning = 0U;
     tiku_esp32c61_sleep_hold(0);
     espw_heap_stats(&st);
+    espw_report_ext("down: PSRAM heap");
     espw_teardown(3);
     ESPW_PRINTF("down: the heap peaked at %lu of %lu bytes, %lu refused\n",
                 (unsigned long)(st.size - st.low), (unsigned long)st.size,
