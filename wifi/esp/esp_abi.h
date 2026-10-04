@@ -328,6 +328,38 @@ void phy_wakeup_init(void);
 
 /** @brief libphy: RF off, the temperature sensor off, hopping settled. */
 void phy_close_rf(void);
+
+/** @brief libphy: tune the receiver to a channel centre (@p mode 0: 20 MHz),
+ *         or, after one, to any frequency in MHz, offset in kHz. */
+void phy_chip_set_chan(unsigned mhz, unsigned mode);
+void phy_set_freq(unsigned mhz, int offset_khz);
+
+/* libphy's RF-test primitives, for the receiver's self-test tone: the
+ * transmit chain forced on through the analog bus, its gain index pinned,
+ * the baseband's tone generators (two; step and gain each) run and stopped. */
+void phy_pbus_debugmode(void);
+void phy_set_txclk_en(unsigned on);
+void phy_pbus_xpd_tx_on(unsigned a, unsigned b);
+void phy_pbus_xpd_rx_on(unsigned on);
+void phy_loopback_mode_en(unsigned on);
+void phy_txcal_debuge_mode_(void);
+unsigned phy_pbus_rd(unsigned a, unsigned b);
+void phy_pbus_force_test(unsigned a, unsigned b, unsigned v);
+unsigned phy_i2c_readReg_Mask(unsigned block, unsigned host, unsigned reg,
+                              unsigned msb, unsigned lsb);
+void phy_i2c_writeReg_Mask(unsigned block, unsigned host, unsigned reg,
+                           unsigned msb, unsigned lsb, unsigned v);
+void phy_set_channel_dcode(unsigned code);
+int phy_meas_tone_pwr_db(unsigned gain, unsigned unused, unsigned sel);
+int phy_get_power_db(unsigned sel);
+void phy_txcal_work_mode(void);
+void phy_set_loopback_gain(unsigned a, unsigned b, unsigned c);
+void phy_pbus_xpd_tx_off(void);
+void phy_pbus_workmode(void);
+void phy_force_pwr_index(unsigned enable, unsigned index);
+int phy_start_tx_tone_step(unsigned en1, unsigned step1, int gain1,
+                           unsigned en2, unsigned step2, int gain2);
+int phy_stop_tx_tone(unsigned arg);
 void phy_xpd_tsens(void);
 void phy_wait_freq_hw_hop_done(void);
 

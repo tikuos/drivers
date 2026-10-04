@@ -45,16 +45,22 @@
 #define ESPW_PMK_LEN     32U
 
 /* The libraries' heap, taken from the SRAM tier while the radio is up: 30 KB
- * at rest, 36 KB at most measured joined with IP traffic and a scan. */
+ * at rest, 36 KB at most measured joined with IP traffic and a scan; with
+ * the receiver built, 32 KB, its packet buffers in PSRAM, so the bank the
+ * receiver borrows fits beside it (peak 22 KB measured so). */
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
+#if (TIKU_DRV_SDR_ESP_ENABLE + 0)
+#define TIKU_DRV_WIFI_ESP_HEAP_BYTES (32U * 1024U)
+#else
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (48U * 1024U)
+#endif
 #endif
 
 /* A PSRAM block the libraries' packet buffers prefer (their _wifi_malloc
  * family), as IDF's SPIRAM_TRY_ALLOCATE_WIFI_LWIP; 0: all in SRAM.  With
- * BLE built too it is on: the two radios' SRAM must fit one heap. */
+ * BLE or the receiver built too it is on: SRAM must fit them as well. */
 #ifndef TIKU_DRV_WIFI_ESP_PSRAM_BYTES
-#if ESPW_COEX
+#if ESPW_COEX || (TIKU_DRV_SDR_ESP_ENABLE + 0)
 #define TIKU_DRV_WIFI_ESP_PSRAM_BYTES (96U * 1024U)
 #else
 #define TIKU_DRV_WIFI_ESP_PSRAM_BYTES 0U

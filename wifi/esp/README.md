@@ -214,6 +214,41 @@ on demand.  Joined to an AP with BLE scanning or advertising, pings come
 back 4 of 4; the shared heap peaked at 48 KB, and both orders of `off`
 give it all back.
 
+## The receiver (raw I/Q)
+
+With `TIKU_DRV_SDR_ESP_ENABLE=1` beside the Wi-Fi driver (and
+`TIKU_ESP32C61_XIP_CODE=1`), the radio is also a 2.4 GHz receiver whose raw
+samples the CPU sees.  The modem's dump unit -- the "mac-dump" owner bits of
+the HP system's SRAM usage register are its one documented trace; how it is
+steered follows what the ESP-SDR project found on this chip, rewritten here
+-- writes the PHY's ADC output into one 64 KB SRAM bank (bank 3,
+0x40830000) the CPU lends it per capture: 10-bit I and Q per word, the
+gain index above, at 4 to 80 MS/s.  The bank comes from the SRAM tier, so
+the build puts Wi-Fi's packet buffers in PSRAM and its heap at 32 KB.
+
+```
+tikuOS:/> sdr start                      bank lent, radio up: "SDR ready"
+tikuOS:/> sdr spec 2437 1 256            one spectrum: "SPEC <MHz> <Hz> <gain> <nfft> <hex>"
+tikuOS:/> sdr sweep 2404 2484 16 1 128   the band in six slices, then "SWEEP 6"
+tikuOS:/> sdr stop
+```
+
+Each spectrum is computed on the board -- 32 Hann-windowed blocks, a
+fixed-point FFT, the power averaged, half-decibels out -- so a 115200-baud
+console carries ten a second; TikuSDR (applications, Device Tools) draws
+them.  What the receiver is: the analog filter passes about +-12 MHz at
+every rate, so the low rates alias (capture at 40 MS/s or more and
+decimate); the dump unit's Q runs opposite to the air, so the samples are
+conjugated before the transform (BLE's 2402/2426/2480 land where they
+should); there are spurs at 0 and -7 MHz; levels are uncalibrated and the
+automatic gain moves them.  It tunes roughly 2.2 to 2.7 GHz.
+
+The transmit side has no counterpart: the dump unit is receive-only and the
+PHY's calibration plays tones, never samples.  What was found -- the tone
+generators, the transmit test mode, the internal loopback through which the
+chip hears its own tone -- is in lab verbs built with
+`TIKU_DRV_SDR_ESP_PROBE=1` alone.
+
 ## Files
 
 - `tiku_drv_wifi_esp.c/.h` -- the driver descriptor, the XIP check, the
@@ -227,6 +262,9 @@ give it all back.
   the arbiter
 - `esp_coex.c`, `esp_coex_abi.h` -- coexistence: the arbiter's adapter, and
   its library's ABI, hand-written
+- `esp_sdr.c`, `tiku_drv_sdr_esp.h`, `esp_sdr_xip.ld` -- the receiver:
+  the bank's loan, the dump unit, the on-board spectra; and the transmit
+  side's lab probes
 - `esp_osi.c` -- the OS the libraries run on: locks and queues over kernel
   wait queues, tasks as worker threads, timers on SYSTIMER's driver alarm,
   their interrupt lines on the radio's CLIC lines

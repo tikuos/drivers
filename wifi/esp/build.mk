@@ -72,6 +72,21 @@ CFLAGS  += -DTIKU_DRV_BLE_ESP_ENABLE=1
 TIKU_XIP_LDS += $(ESPW_DIR)/esp_ble_xip.ld
 endif
 
+# The radio as a receiver: raw I/Q snapshots through the PHY the Wi-Fi
+# driver brings up.
+ifeq ($(TIKU_DRV_SDR_ESP_ENABLE),1)
+ifneq ($(TIKU_DRV_WIFI_ESP_ENABLE),1)
+$(error TIKU_DRV_SDR_ESP_ENABLE needs TIKU_DRV_WIFI_ESP_ENABLE=1)
+endif
+SRCS    += $(ESPW_DIR)/esp_sdr.c
+CFLAGS  += -DTIKU_DRV_SDR_ESP_ENABLE=1
+TIKU_XIP_LDS += $(ESPW_DIR)/esp_sdr_xip.ld
+# Its transmit side's lab probes, only when asked for.
+ifeq ($(TIKU_DRV_SDR_ESP_PROBE),1)
+CFLAGS  += -DTIKU_DRV_SDR_ESP_PROBE=1
+endif
+endif
+
 # Both radios: the coexistence arbiter between them (most of it in ROM).
 ifneq ($(ESPW_COEX),)
 SRCS    += $(ESPW_DIR)/esp_coex.c
