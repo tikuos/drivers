@@ -225,7 +225,8 @@ steered follows what the ESP-SDR project found on this chip, rewritten here
 -- writes the PHY's ADC output into one 64 KB SRAM bank (bank 3,
 0x40830000) the CPU lends it per capture: 10-bit I and Q per word, the
 gain index above, at 4 to 80 MS/s.  The bank comes from the SRAM tier, so
-the build puts Wi-Fi's packet buffers in PSRAM and its heap at 32 KB.
+the build puts Wi-Fi's packet buffers in PSRAM and its heap at 32 KB, and
+the link fails if the kernel image grows into the bank.
 
 ```
 tikuOS:/> sdr start                      bank lent, radio up: "SDR ready"
