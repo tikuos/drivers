@@ -18,6 +18,12 @@
 #define TIKU_DRV_SDR_ESP_RATES      6U          /* 80 40 20 10 8 4 MS/s */
 #define TIKU_DRV_SDR_ESP_BINS       32U
 
+/* The gain index captures are held at unless told: about a decibel a step,
+ * the AGC idling at 76, and 60 the lowest whose noise floor is still the
+ * antenna's rather than the ADC's -- as sensitive, 16 dB further from the
+ * rail.  Held, the levels hold still while the AGC would chase each burst. */
+#define TIKU_DRV_SDR_ESP_HOLD       60
+
 /** @brief What one snapshot measured. */
 typedef struct {
     uint32_t words;         /**< samples captured */
@@ -58,8 +64,10 @@ int tiku_drv_sdr_esp_capture(uint32_t mhz, uint8_t rate, uint32_t words,
  *        nfft windowed (Hann) and transformed, the power averaged.
  *
  * @param db    @p nfft bins, low to high frequency, in half-decibels of an
- *              uncalibrated scale (the receiver's AGC sets the level)
- * @param gain  the receiver's gain index during the capture
+ *              uncalibrated scale (the receiver's gain sets the level)
+ * @param gain  the receiver's gain index during the capture: the one held
+ *              (taken lower again while the ADC clips), or the AGC's at the
+ *              first sample
  * @return 0, or as tiku_drv_sdr_esp_capture() fails; nfft 64, 128 or 256
  */
 int tiku_drv_sdr_esp_spectrum(uint32_t mhz, uint8_t rate, unsigned nfft,
@@ -67,6 +75,13 @@ int tiku_drv_sdr_esp_spectrum(uint32_t mhz, uint8_t rate, unsigned nfft,
 
 /** @brief Whether the capture bank is lent. */
 int tiku_drv_sdr_esp_reserved(void);
+
+/** @brief Hold the receiver's gain at index @p index (0-255) for the
+ *         captures that follow, or -1: leave it to the AGC. */
+void tiku_drv_sdr_esp_hold(int index);
+
+/** @brief The gain index held, or -1 while the AGC sets it. */
+int tiku_drv_sdr_esp_held(void);
 
 /** @brief The last snapshot's words: I in bits 0-9, Q in 10-19, both two's
  *         complement, the gain index above; Q is negated against the air

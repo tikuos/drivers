@@ -363,6 +363,10 @@ int phy_stop_tx_tone(unsigned arg);
 void phy_xpd_tsens(void);
 void phy_wait_freq_hw_hop_done(void);
 
+/** @brief libphy: hold the receiver's gain at @p index in place of the AGC's
+ *         pick (bits 31..24 of the AGC block's word 0x2C, bit 23 holding). */
+void phy_force_rx_gain(unsigned enable, unsigned index);
+
 /** @brief libphy: whether Wi-Fi is the PHY's user now. */
 void phy_wifi_enable_set(uint8_t enable);
 

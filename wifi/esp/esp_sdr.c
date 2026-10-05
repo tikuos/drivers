@@ -65,6 +65,7 @@
 
 static tiku_arena_t sdr_bank;
 static uint8_t      sdr_reserved;
+static int16_t      sdr_hold = TIKU_DRV_SDR_ESP_HOLD; /* gain index, -1 AGC */
 #if TIKU_DRV_SDR_ESP_PROBE
 static uint8_t      sdr_source = 15U;    /* the unit's tap: 15 is the ADC */
 static unsigned     fsk_a, fsk_b;         /* steps the capture toggles */
@@ -309,9 +310,10 @@ static void measure(uint32_t words, tiku_drv_sdr_esp_result_t *out) {
 }
 
 /** @brief Tune, then run the unit for @p words at rate code @p rate into the
- *         bank; @p us its wall time.  @return 0, -2 not done, -3 nothing */
+ *         bank at gain index @p gain (-1: the AGC's); @p us its wall time.
+ *         @return 0, -2 not done, -3 nothing */
 static int capture_raw(uint32_t mhz, uint8_t rate, uint32_t words,
-                       uint32_t *us) {
+                       uint32_t *us, int gain) {
     volatile uint32_t *bank = (volatile uint32_t *)SRAM_BANK_ADDR;
     uint32_t m, j, t0, same = 0UL;
     int done;
@@ -329,10 +331,17 @@ static int capture_raw(uint32_t mhz, uint8_t rate, uint32_t words,
         phy_set_freq((unsigned)mhz, 0);
     }
 
+    /* The gain held for this capture alone: the AGC has the radio between. */
     m = tiku_esp32c61_mie_off();
+    if (gain >= 0) {
+        phy_force_rx_gain(1U, (unsigned)gain);
+    }
     t0 = (uint32_t)tiku_cpu_esp32c61_systimer();
     done = dump_run(words, rate);
     *us = ((uint32_t)tiku_cpu_esp32c61_systimer() - t0) / 16U;
+    if (gain >= 0) {
+        phy_force_rx_gain(0U, 0U);
+    }
     tiku_esp32c61_mie_restore(m);
 
     for (j = 0U; j < words; j++) {
@@ -361,11 +370,19 @@ int tiku_drv_sdr_esp_capture(uint32_t mhz, uint8_t rate, uint32_t words,
     memset(out, 0, sizeof *out);
     out->words = words;
     out->hz = sdr_rates[rate];
-    rc = capture_raw(mhz, rate, words, &out->us);
+    rc = capture_raw(mhz, rate, words, &out->us, sdr_hold);
     if (rc == 0) {
         measure(words, out);
     }
     return rc;
+}
+
+void tiku_drv_sdr_esp_hold(int index) {
+    sdr_hold = (int16_t)(index < 0 ? -1 : index > 255 ? 255 : index);
+}
+
+int tiku_drv_sdr_esp_held(void) {
+    return sdr_hold;
 }
 
 /*---------------------------------------------------------------------------*/
@@ -375,6 +392,30 @@ int tiku_drv_sdr_esp_capture(uint32_t mhz, uint8_t rate, uint32_t words,
 
 #define SPEC_BLOCKS         32U
 #define SPEC_SCRATCH        (SRAM_BANK_ADDR + SRAM_BANK_BYTES / 2U)
+
+/* A held capture with more than SPEC_RAILED samples at the ADC's rail is
+ * splattered across the spectrum: it is taken again SPEC_STEP indices
+ * (about as many decibels) lower. */
+#define SPEC_RAIL           510
+#define SPEC_RAILED         4U
+#define SPEC_STEP           16
+
+/** @brief Whether more than SPEC_RAILED of the bank's first @p words sit at
+ *         the ADC's rail. */
+static int railed(uint32_t words) {
+    const uint32_t *w = (const uint32_t *)SRAM_BANK_ADDR;
+    uint32_t j, n = 0UL;
+
+    for (j = 0U; j < words && n <= SPEC_RAILED; j++) {
+        int32_t i = field10(w[j], 0U), q = field10(w[j], 10U);
+
+        if (i >= SPEC_RAIL || i <= -SPEC_RAIL || q >= SPEC_RAIL ||
+            q <= -SPEC_RAIL) {
+            n++;
+        }
+    }
+    return n > SPEC_RAILED;
+}
 
 /* A quarter wave in 64 steps, Q15: the twiddles' and the window's source. */
 static const int16_t sin_q[65] = {
@@ -459,14 +500,20 @@ int tiku_drv_sdr_esp_spectrum(uint32_t mhz, uint8_t rate, unsigned nfft,
     const uint32_t *w = (const uint32_t *)SRAM_BANK_ADDR;
     uint32_t us, words = nfft * SPEC_BLOCKS;
     unsigned b, j, step;
-    int rc;
+    int rc, held = sdr_hold;
 
     if (!sdr_ready(rate) || (nfft != 64U && nfft != 128U && nfft != 256U)) {
         return -1;
     }
-    rc = capture_raw(mhz, rate, words, &us);
-    if (rc != 0) {
-        return rc;
+    for (;;) {
+        rc = capture_raw(mhz, rate, words, &us, held);
+        if (rc != 0) {
+            return rc;
+        }
+        if (held < SPEC_STEP || !railed(words)) {
+            break;
+        }
+        held -= SPEC_STEP;
     }
     *gain = (uint8_t)(w[0] >> 20);
     step = 256U / nfft;

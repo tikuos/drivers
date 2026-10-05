@@ -230,8 +230,9 @@ the link fails if the kernel image grows into the bank.
 
 ```
 tikuOS:/> sdr start                      bank lent, radio up: "SDR ready"
-tikuOS:/> sdr spec 2437 1 256            one spectrum: "SPEC <MHz> <Hz> <gain> <nfft> <hex>"
+tikuOS:/> sdr spec 2437 1 256            one spectrum: "SPEC <MHz> <Hz> <gain> <nfft> <hex> held"
 tikuOS:/> sdr sweep 2404 2484 16 1 128   the band in six slices, then "SWEEP 6"
+tikuOS:/> sdr gain [auto | <index>]      the gain captures are held at (60), or the AGC's
 tikuOS:/> sdr stop
 ```
 
@@ -242,8 +243,18 @@ them.  What the receiver is: the analog filter passes about +-12 MHz at
 every rate, so the low rates alias (capture at 40 MS/s or more and
 decimate); the dump unit's Q runs opposite to the air, so the samples are
 conjugated before the transform (BLE's 2402/2426/2480 land where they
-should); there are spurs at 0 and -7 MHz; levels are uncalibrated and the
-automatic gain moves them.  It tunes roughly 2.2 to 2.7 GHz.
+should); there are spurs at 0 and -7 MHz; levels are uncalibrated.  It
+tunes roughly 2.2 to 2.7 GHz.
+
+The gain is held, not left to the AGC, which chases every burst (index 76
+idle, down to 25 for a Bluetooth hop beside the board) and so moves the
+levels from one capture to the next and between a sweep's slices.  An index
+step is about a decibel (measured from 28 to 76), and below about 52 the
+noise floor is the ADC's rather than the antenna's: 60, the default, hears
+as well as 76 with 16 dB more room before the rail.  A capture that still
+reaches the rail (more than four samples at +-510) is taken again 16 lower;
+the SPEC line says the index it was heard at, and `held`, so a viewer can
+raise it back.
 
 The transmit side has no counterpart: the dump unit is receive-only and the
 PHY's calibration plays tones, never samples.  What was found -- the tone
