@@ -174,118 +174,7 @@ static uint8_t      *whd_clm_iov_buf;
  * Magic + checksum together protect against an uninitialised section
  * being misread as a valid record on first boot.
  */
-#define WIFI_CRED_MAGIC  0x57494649UL   /* "WIFI" */
-
-typedef struct {
-    uint32_t magic;          /* WIFI_CRED_MAGIC when populated */
-    uint8_t  ssid_len;       /* 0 = empty / forgotten          */
-    uint8_t  auth_flavor;    /* 0 = WPA2-PSK, 1 = WPA3-SAE     */
-    uint8_t  _pad[2];
-    char     ssid[33];       /* null-terminated, 32 + NUL      */
-    char     psk[64];        /* null-terminated, 63 + NUL      */
-    uint32_t xor_check;      /* xor of all bytes above (sanity) */
-} wifi_cred_persist_t;
-
-static TIKU_DURABLE wifi_cred_persist_t wifi_cred_nvm;
-
-/**
- * @brief Compute XOR checksum for a credential record
- *
- * Compute simple XOR checksum over everything except xor_check
- * itself. Catches bitrot + half-written records — not crypto.
- *
- * @param c  Credential record to checksum
- * @return XOR checksum across bytes preceding the xor_check field
- */
-static uint32_t wifi_cred_xor(const wifi_cred_persist_t *c)
-{
-    const uint8_t *p = (const uint8_t *)c;
-    uint32_t x = 0UL;
-    size_t   i;
-    size_t   n = (size_t)((const uint8_t *)&c->xor_check - p);
-    for (i = 0U; i < n; ++i) x ^= ((uint32_t)p[i] << ((i & 3U) * 8U));
-    return x;
-}
-
-/**
- * @brief Load stored credentials from the .persistent record
- *
- * Returns 0 unless the magic and xor checksum both validate, so a
- * fresh or corrupted FRAM record is rejected cleanly.
- *
- * @param out_ssid_len  Unused; kept for ABI symmetry
- * @param out_ssid      Destination SSID buffer (33 bytes, NUL-padded)
- * @param out_psk       Destination passphrase buffer (64 bytes)
- * @param out_auth      Receives the stored auth flavor (0=WPA2, 1=WPA3)
- * @return Stored ssid_len on success, 0 if no valid record exists
- */
-static int wifi_cred_load(uint8_t out_ssid_len,
-                          char    out_ssid[33],
-                          char    out_psk[64],
-                          uint8_t *out_auth)
-{
-    (void)out_ssid_len;
-    if (wifi_cred_nvm.magic != WIFI_CRED_MAGIC) return 0;
-    if (wifi_cred_nvm.ssid_len == 0U
-        || wifi_cred_nvm.ssid_len > 32U) return 0;
-    if (wifi_cred_xor(&wifi_cred_nvm) != wifi_cred_nvm.xor_check) return 0;
-    {
-        uint8_t i;
-        for (i = 0U; i < 33U; ++i) out_ssid[i] = wifi_cred_nvm.ssid[i];
-        for (i = 0U; i < 64U; ++i) out_psk[i]  = wifi_cred_nvm.psk[i];
-        *out_auth = wifi_cred_nvm.auth_flavor;
-    }
-    return wifi_cred_nvm.ssid_len;
-}
-
-/**
- * @brief Write current credentials to the .persistent record
- *
- * Unlocks the NVM region via MPU, writes the record, recomputes the
- * xor_check field, then re-locks NVM. No-op if ssid_len is out of
- * range so callers can pass through unsanitised input safely.
- *
- * @param ssid_len  Length of the SSID in bytes (1..32)
- * @param ssid      Null-terminated SSID string
- * @param psk       Null-terminated passphrase
- * @param auth      Auth flavor to record (0=WPA2-PSK, 1=WPA3-SAE)
- */
-static void wifi_cred_save(uint8_t ssid_len,
-                           const char *ssid,
-                           const char *psk,
-                           uint8_t auth)
-{
-    uint16_t mpu_saved;
-    uint8_t  i;
-    if (ssid_len == 0U || ssid_len > 32U) return;
-
-    mpu_saved = tiku_mpu_unlock_nvm();
-    wifi_cred_nvm.magic       = WIFI_CRED_MAGIC;
-    wifi_cred_nvm.ssid_len    = ssid_len;
-    wifi_cred_nvm.auth_flavor = auth;
-    wifi_cred_nvm._pad[0]     = 0U;
-    wifi_cred_nvm._pad[1]     = 0U;
-    for (i = 0U; i < 33U; ++i) wifi_cred_nvm.ssid[i] = ssid[i];
-    for (i = 0U; i < 64U; ++i) wifi_cred_nvm.psk[i]  = psk[i];
-    wifi_cred_nvm.xor_check   = wifi_cred_xor(&wifi_cred_nvm);
-    tiku_mpu_lock_nvm(mpu_saved);
-}
-
-/**
- * @brief Invalidate the stored credential record
- *
- * Zero the magic so the next wifi_cred_load() returns 0. The rest of
- * the bytes are left in place — magic mismatch alone is enough to
- * make the record unusable.
- */
-static void wifi_cred_forget(void)
-{
-    uint16_t mpu_saved = tiku_mpu_unlock_nvm();
-    wifi_cred_nvm.magic    = 0UL;
-    wifi_cred_nvm.ssid_len = 0U;
-    /* leave bytes — magic mismatch is enough */
-    tiku_mpu_lock_nvm(mpu_saved);
-}
+#include "whd_credentials.inl"
 
 /*---------------------------------------------------------------------------*/
 /* RUNNER STATE                                                              */
@@ -349,6 +238,7 @@ static struct {
      * by tiku_wireless_disconnect() to suppress auto-reconnect after
      * an explicit teardown. */
     uint8_t           user_disconnected;
+    uint8_t           disconnect_pending;   /* accepted, not yet run */
     uint8_t           reconnect_attempts;
     tiku_clock_time_t reconnect_at_tick;
 
@@ -358,6 +248,9 @@ static struct {
     int16_t           rssi_dbm;
     tiku_clock_time_t rssi_last_tick;
 } cyw43_state;
+
+/* Defined in whd_control.inl, which needs the runner declared first. */
+static void wifi_disconnect_done(int rc, uint8_t was_joined);
 
 /*---------------------------------------------------------------------------*/
 /* SDPCM credit update                                                       */
@@ -1955,6 +1848,7 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                 CYW43_PRINTF("runner: no stored credentials; "
                              "use `wifi connect <ssid> <psk>`\n");
             }
+            wifi_clear_bytes(rec_psk, sizeof rec_psk);
         }
     } else {
         CYW43_PRINTF("runner: WHD bring-up failed — runner idle\n");
@@ -1971,9 +1865,17 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          * When not joined, plain YIELD is correct: no traffic to
          * expect, so we idle-sleep until an explicit event (shell
          * scan/connect/disconnect). The BT path runs on its own
-         * tiku_bt_runner process now; the WHD runner is purely WiFi. */
+         * tiku_bt_runner process now; the WHD runner is purely WiFi.
+         *
+         * An event delivered during the timed wait is consumed by it, so
+         * a scan, join or disconnect request ends the wait and reaches its
+         * handler below.  The wait yields before testing ev, so the request
+         * this pass just handled cannot end it again. */
         if (cyw43_state.link_state == TIKU_WIRELESS_LINK_JOINED) {
-            PT_WAIT_UNTIL_TIMEOUT(process_pt, &rx_drain_timer, 0, 1U);
+            PT_YIELD_UNTIL_TIMEOUT(process_pt, &rx_drain_timer,
+                                   ev == CYW43_WIFI_EVT_SCAN_START ||
+                                   ev == TIKU_WIRELESS_EVT_JOIN_START ||
+                                   ev == TIKU_WIRELESS_EVT_DISCONNECT, 1U);
         } else {
             TIKU_PROCESS_YIELD();
         }
@@ -2004,6 +1906,8 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
          * auto-reconnect never fired. */
         if (cyw43_state.up
             && cyw43_state.link_state == TIKU_WIRELESS_LINK_IDLE
+            && cyw43_state.scan_in_progress == 0U
+            && cyw43_state.disconnect_pending == 0U
             && cyw43_state.user_disconnected == 0U
             && cyw43_state.target_ssid_len > 0U
             && cyw43_state.reconnect_attempts > 0U
@@ -2011,9 +1915,10 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
                                    - cyw43_state.reconnect_at_tick)
                < (tiku_clock_time_t)(((tiku_clock_time_t)-1 >> 1) + 1)) {
             CYW43_PRINTF("runner: auto-reconnect (idle): re-posting JOIN_START\n");
-            cyw43_state.link_state = TIKU_WIRELESS_LINK_CONNECTING;
-            (void)tiku_process_post(&cyw43_runner,
-                                    TIKU_WIRELESS_EVT_JOIN_START, NULL);
+            if (tiku_process_post(&cyw43_runner,
+                                  TIKU_WIRELESS_EVT_JOIN_START, NULL)) {
+                cyw43_state.link_state = TIKU_WIRELESS_LINK_CONNECTING;
+            }
         }
 
         /* RSSI poll: every 2s when joined. Single IOCTL, returns int32
@@ -2285,19 +2190,13 @@ TIKU_PROCESS_THREAD(cyw43_runner, ev, data)
         }
 
         if (ev == TIKU_WIRELESS_EVT_DISCONNECT) {
+            uint8_t was_joined = (uint8_t)(cyw43_state.link_state
+                                           == TIKU_WIRELESS_LINK_JOINED);
             int rc_d = whd_ioctl(WHD_IOCTL_KIND_SET, WHD_CMD_DISASSOC, 0U,
                                  (const uint8_t *)0, 0U,
                                  (uint8_t *)0, 0U, (uint32_t *)0);
             CYW43_PRINTF("runner: DISCONNECT rc=%d\n", rc_d);
-            cyw43_state.link_state         = TIKU_WIRELESS_LINK_IDLE;
-            cyw43_state.joined_ssid_len    = 0U;
-            cyw43_state.target_ssid_len    = 0U;   /* prevents auto-reconnect */
-            cyw43_state.user_disconnected  = 1U;
-            cyw43_state.reconnect_attempts = 0U;
-            cyw43_state.rssi_dbm           = 0;
-            (void)tiku_process_post(TIKU_PROCESS_BROADCAST,
-                                    TIKU_WIRELESS_EVT_LINK_DOWN,
-                                    (tiku_event_data_t)(uintptr_t)0);
+            wifi_disconnect_done(rc_d, was_joined);
         }
     }
 
@@ -2391,19 +2290,6 @@ int whd_runner_init(void)
     return TIKU_DRV_OK;
 }
 
-int tiku_wireless_scan_start(void)
-{
-    if (!cyw43_state.up) {
-        return TIKU_DRV_ERR_INVALID;
-    }
-    if (cyw43_state.scan_in_progress) {
-        return TIKU_DRV_ERR_TIMEOUT;
-    }
-    return tiku_process_post(&cyw43_runner,
-                             CYW43_WIFI_EVT_SCAN_START, NULL)
-           ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
-}
-
 int tiku_wireless_status(cyw43_wifi_status_t *out)
 {
     int i;
@@ -2412,6 +2298,7 @@ int tiku_wireless_status(cyw43_wifi_status_t *out)
     }
     out->up               = cyw43_state.up;
     out->scan_in_progress = cyw43_state.scan_in_progress;
+    out->disconnect_pending = cyw43_state.disconnect_pending;
     out->scan_aps_found   = cyw43_state.scan_aps_found;
     out->last_scan_ticks  = cyw43_state.last_scan_ticks;
     out->irq_count        = cyw43_state.gpio_irq_count;
@@ -2435,73 +2322,7 @@ int tiku_wireless_power(uint8_t on)
     return TIKU_DRV_ERR_INVALID;
 }
 
-int tiku_wireless_connect_auth(const char *ssid, const char *psk,
-                               tiku_wireless_auth_t auth)
-{
-    uint8_t i, slen = 0U, plen = 0U;
-    uint8_t min_plen;
-
-    if (!ssid || !psk) return TIKU_DRV_ERR_INVALID;
-    if (!cyw43_state.up) return TIKU_DRV_ERR_INVALID;
-    if (cyw43_state.link_state == TIKU_WIRELESS_LINK_CONNECTING) {
-        return TIKU_DRV_ERR_TIMEOUT;
-    }
-    while (ssid[slen] && slen < 32U) ++slen;
-    /* WPA3 sae_password allows up to 127 chars; WPA2 PSK is 8..63. */
-    while (psk[plen]  && plen < 127U) ++plen;
-    min_plen = (auth == TIKU_WIRELESS_AUTH_WPA3_SAE) ? 1U : 8U;
-    if (slen == 0U || plen < min_plen) return TIKU_DRV_ERR_INVALID;
-    if (auth == TIKU_WIRELESS_AUTH_WPA2_PSK && plen > 63U) {
-        return TIKU_DRV_ERR_INVALID;
-    }
-
-    /* Copy strings into runner-owned storage. Caller's buffers may
-     * be on the shell command's stack — they don't survive the
-     * tiku_process_post return. */
-    for (i = 0U; i < slen; ++i) cyw43_state.target_ssid[i] = ssid[i];
-    cyw43_state.target_ssid[slen] = '\0';
-    cyw43_state.target_ssid_len   = slen;
-    for (i = 0U; i < plen; ++i) cyw43_state.target_psk[i] = psk[i];
-    cyw43_state.target_psk[plen]  = '\0';
-    cyw43_state.target_auth       = (auth == TIKU_WIRELESS_AUTH_WPA3_SAE) ? 1U : 0U;
-    cyw43_state.link_state        = TIKU_WIRELESS_LINK_CONNECTING;
-    cyw43_state.user_disconnected = 0U;
-    cyw43_state.reconnect_attempts = 0U;
-
-    return tiku_process_post(&cyw43_runner,
-                             TIKU_WIRELESS_EVT_JOIN_START, NULL)
-           ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
-}
-
-int tiku_wireless_connect(const char *ssid, const char *psk)
-{
-    return tiku_wireless_connect_auth(ssid, psk,
-                                      TIKU_WIRELESS_AUTH_WPA2_PSK);
-}
-
-int tiku_wireless_disconnect(void)
-{
-    if (!cyw43_state.up) return TIKU_DRV_ERR_INVALID;
-    return tiku_process_post(&cyw43_runner,
-                             TIKU_WIRELESS_EVT_DISCONNECT, NULL)
-           ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
-}
-
-int tiku_wireless_forget(void)
-{
-    /* Wipe the FRAM-backed record first; if we crash before posting
-     * the disconnect event, the NEXT boot will at least not auto-
-     * rejoin the network we wanted to forget. */
-    wifi_cred_forget();
-
-    /* Best-effort live teardown. If radio isn't up we're already
-     * done — the user wanted creds gone, they are. */
-    if (cyw43_state.up) {
-        (void)tiku_process_post(&cyw43_runner,
-                                TIKU_WIRELESS_EVT_DISCONNECT, NULL);
-    }
-    return TIKU_DRV_OK;
-}
+#include "whd_control.inl"
 
 /* Frames: the chip's own calls, which already run in the kernel thread (the
  * runner's RX poll calls the receiver). */

@@ -730,6 +730,15 @@ int tiku_wireless_forget(void) {
     return TIKU_DRV_OK;
 }
 
+/* No profile is saved, so there is none to describe. */
+int tiku_wireless_saved_profile(tiku_wireless_saved_profile_t *out) {
+    if (out == NULL) {
+        return TIKU_DRV_ERR_INVALID;
+    }
+    memset(out, 0, sizeof *out);
+    return TIKU_DRV_ERR_NOT_PRESENT;
+}
+
 int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
     int rc;
 
