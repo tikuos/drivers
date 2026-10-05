@@ -52,12 +52,14 @@ BLE, with `TIKU_DRV_BLE_ESP_ENABLE=1` in place of (or beside) the Wi-Fi
 flag.  Both together need `TIKU_ESP32C61_XIP_CODE=1` to fit SRAM, and then
 share one heap and Espressif's coexistence arbiter (see Coexistence).
 
-For IP over the radio add the lean net stack (TikuBench's wifi firmware for
-this board builds the same):
+For IP over the radio add the lean net stack, with kernel code run from flash
+so the SRAM tier keeps its 32 KB floor (TikuBench's wifi firmware for this
+board builds the same):
 
 ```
 TIKU_KIT_NET_ENABLE=1 TIKU_KIT_NET_MIN=1 TIKU_KITS_NET_WIFI_ENABLE=1
 TIKU_KITS_NET_DHCP_ENABLE=1 TIKU_KITS_NET_DNS_ENABLE=1
+TIKU_ESP32C61_XIP_CODE=1
 ```
 
 The libraries' code is too large for the 320 KB SRAM the kernel runs from,
@@ -73,8 +75,7 @@ of calling into it:
 ```
 
 The SRAM image is 221 KB (the libraries' `.iram1` code and data, the
-supplicant and its crypto included), 236 KB with the IP stack, and
-`xip.bin` 381 KB.  BASIC with HTTPS does not fit SRAM beside the radio
+supplicant and its crypto included) and `xip.bin` 381 KB.  BASIC with HTTPS does not fit SRAM beside the radio
 as it stands: build it with `TIKU_ESP32C61_XIP_CODE=1` (BASIC, the shell's
 commands, the IP stack, TLS and crypto run from flash) and
 `TIKU_ESP32C61_PSRAM_DATA=1` (TLS's and BASIC's big buffers in PSRAM) -- 135
