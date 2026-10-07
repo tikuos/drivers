@@ -747,6 +747,7 @@ static int espb_power_up(void) {
 static int espb_power_down(void) {
     espw_heap_stats_t st;
 
+    tiku_bt_shutdown();
     espw_heap_stats(&st);
     espb_teardown(STAGE_ENABLED);
     ESPB_PRINTF("down: the heap peaked at %lu of %lu bytes, %lu refused, "
@@ -764,6 +765,11 @@ int tiku_drv_ble_esp_power(uint8_t on) {
         return TIKU_DRV_OK;
     }
     return on ? espb_power_up() : espb_power_down();
+}
+
+/* The host stack's switch (tiku_bt_power(), `bt on/off`). */
+int tiku_bt_controller_power(uint8_t on) {
+    return tiku_drv_ble_esp_power(on);
 }
 
 void tiku_drv_ble_esp_status(tiku_drv_ble_esp_status_t *out) {
