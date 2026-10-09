@@ -19,8 +19,7 @@
 #include "tiku.h"
 #include <hal/tiku_cpu.h>
 #include <kernel/threads/tiku_thread.h>
-#include <arch/esp32c61/tiku_crt_early.h>
-#include <arch/esp32c61/tiku_irq_arch.h>
+#include "esp_arch.h"
 
 #include "esp_ble.h"
 #include "esp_ble_abi.h"
@@ -126,7 +125,7 @@ static int pool_owns(const npl_pool_t *p, const void *obj) {
  *         without one, and the dump says which kind ran out. */
 static void *pool_get(int kind) {
     npl_pool_t *p = &npl_pools[kind];
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     for (uint32_t i = 0U; i < p->count; i++) {
         uint32_t bit = 1UL << (i % 32U);
@@ -138,12 +137,12 @@ static void *pool_get(int kind) {
             if (++p->live > p->peak) {
                 p->peak = p->live;
             }
-            tiku_esp32c61_mie_restore(m);
+            espw_arch_mie_restore(m);
             memset(obj, 0, p->size);
             return obj;
         }
     }
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     ESPB_PRINTF("out of NPL %ss (%u made)\n", npl_kind[kind],
                 (unsigned)p->count);
     __builtin_trap();
@@ -151,7 +150,7 @@ static void *pool_get(int kind) {
 
 static void pool_put(int kind, void *obj) {
     npl_pool_t *p = &npl_pools[kind];
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     if (pool_owns(p, obj)) {
         uint32_t i = (uint32_t)(((uintptr_t)obj - (uintptr_t)p->base) /
@@ -160,7 +159,7 @@ static void pool_put(int kind, void *obj) {
         p->used[i / 32U] &= ~(1UL << (i % 32U));
         p->live--;
     }
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -406,7 +405,7 @@ static ble_npl_error_t npl_mutex_pend(struct ble_npl_mutex *mu,
     if (m == NULL) {
         return BLE_NPL_INVALID_PARAM;
     }
-    if (tiku_esp32c61_in_isr()) {
+    if (espw_arch_in_isr()) {
         return BLE_NPL_ERR_IN_ISR;
     }
     espw_deadline_start(&d, tmo);
@@ -655,7 +654,7 @@ static uint32_t         npl_crit_mie;
 static volatile uint8_t npl_crit_depth;
 
 static uint32_t npl_hw_enter_critical(void) {
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     if (npl_crit_depth++ == 0U) {
         npl_crit_mie = m;
@@ -666,7 +665,7 @@ static uint32_t npl_hw_enter_critical(void) {
 static void npl_hw_exit_critical(uint32_t ctx) {
     (void)ctx;
     if (npl_crit_depth != 0U && --npl_crit_depth == 0U) {
-        tiku_esp32c61_mie_restore(npl_crit_mie);
+        espw_arch_mie_restore(npl_crit_mie);
     }
 }
 

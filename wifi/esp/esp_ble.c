@@ -1,16 +1,10 @@
 /*
- * Tiku Drivers - ESP32-C61 BLE: the controller's life cycle and its HCI
+ * Tiku Drivers - ESP32-C5/C61 BLE controller lifecycle and HCI transport
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * Espressif's LE controller library under tikuOS's own host stack.  On:
- * register what the controller calls (ext, NPL, coexistence), clock the BLE
- * MAC, initialise and enable the controller in the order IDF's
- * esp_bt_controller_init/enable use (read as reference, never copied), and
- * give the host a tiku_bt_transport_t over the controller's in-memory HCI.
- * Off undoes all of it and gives every byte back.
- *
- * The controller's code runs from flash (IDF's run-in-flash-only mode, with
- * its relaxed timing); its task is a worker thread; its interrupt lines are
- * held across flash writes like Wi-Fi's.
+ * Espressif's controller runs over TikuOS workers, timers and memory pools.
+ * Ordinary vendor code executes from flash; IRQ paths stay in SRAM.
+ * Shutdown stops the worker before returning the controller heap.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,11 +17,11 @@
 #include "tiku.h"
 #include <hal/tiku_cpu.h>
 #include <kernel/threads/tiku_thread.h>
-#include <arch/esp32c61/tiku_cpu_freq_boot_arch.h>
-#include <arch/esp32c61/tiku_irq_arch.h>
-#include <arch/esp32c61/tiku_sleep_arch.h>
-#include <arch/esp32c61/tiku_trng_arch.h>
-#include <arch/esp32c61/tiku_xip_arch.h>
+#include "esp_arch.h"
+#if defined(PLATFORM_ESP32C5)
+#include <arch/esp32c5/tiku_cpu_common.h>
+#include <arch/esp32c5/tiku_esp32c5_regs.h>
+#endif
 #include <interfaces/bluetooth/tiku_bt.h>
 #include <interfaces/bluetooth/tiku_bt_transport.h>
 #include <tikukits/crypto/p256/tiku_kits_crypto_p256.h>
@@ -123,10 +117,17 @@ static int espb_task_create(void *fn, const char *name, uint32_t depth,
 }
 
 static void espb_task_delete(void *handle) {
+    tiku_thread_t *task = espb_task;
     if ((void *)espb_task == handle) {
         espb_task = NULL;
     }
     espw_osi_funcs._task_delete(handle);
+    /* The vendor frees its environment after this callback returns.
+     * Wait for deferred worker cancellation before permitting that free. */
+    if (task != NULL && handle == (void *)task &&
+        task != tiku_thread_self()) {
+        (void)tiku_thread_join(task);
+    }
 }
 
 static void espb_assert(const uint32_t ln, const char *fn, uint32_t p1,
@@ -140,7 +141,11 @@ static void espb_assert(const uint32_t ln, const char *fn, uint32_t p1,
 static uint32_t espb_random(void) {
     uint32_t v = 0U;
 
+#if defined(PLATFORM_ESP32C5)
+    (void)espw_c5_random((uint8_t *)&v, sizeof v);
+#else
     (void)tiku_trng_arch_read_u32(&v);
+#endif
     return v;
 }
 
@@ -168,7 +173,13 @@ static int espb_ecc_key_pair(uint8_t *pub, uint8_t *priv) {
     int rc;
 
     do {
-        if (tiku_trng_arch_read_bytes(seed, sizeof seed) != 0) {
+        if (
+#if defined(PLATFORM_ESP32C5)
+            espw_c5_random(seed, sizeof seed)
+#else
+            tiku_trng_arch_read_bytes(seed, sizeof seed)
+#endif
+            != 0) {
             return ESPB_KEY_ERR;
         }
         rc = tiku_kits_crypto_p256_ecdh_keypair(seed, d, q);
@@ -248,9 +259,11 @@ static espb_coex_funcs_t espb_coex = {
  *         only, HCI in memory, BLE 5 features on), cut to what tikuOS's host
  *         uses: one link, a 23-byte ATT MTU, legacy advertising. */
 static void espb_config(espb_config_t *c) {
+#if !defined(PLATFORM_ESP32C5)
     tiku_esp32c61_clock_t clk;
 
     tiku_cpu_esp32c61_clock_probe(&clk);
+#endif
     memset(c, 0, sizeof *c);
     c->config_version = ESPB_CONFIG_VERSION;
     c->ble_ll_resolv_list_size = 4U;
@@ -283,8 +296,13 @@ static void espb_config(espb_config_t *c) {
     c->controller_task_prio = 23U;
     c->cca_rssi_thresh = (uint8_t)(256U - 50U);
     c->ble_scan_classify_filter_enable = 1U;
+#if defined(PLATFORM_ESP32C5)
+    c->main_xtal_freq = (uint8_t)((TIKU_C5_REG_READ(0x60096110u) >> 24) & 127u);
+    c->cpu_freq_mhz = (uint8_t)(tiku_cpu_mclk_hz() / 1000000UL);
+#else
     c->main_xtal_freq = 40U;
     c->cpu_freq_mhz = (uint8_t)(clk.cpu_hz / 1000000UL);
+#endif
     c->csa2_select = 1U;
     c->scan_backoff_upperlimitmax = 32U;
     c->ble_data_lenth_zero_aux = 1U;
@@ -605,7 +623,7 @@ static void espb_teardown(int stage) {
         coex_disable();
 #endif
         espw_phy_bt_disable();
-        tiku_esp32c61_sleep_hold(0);
+        espw_arch_sleep_hold(0);
     }
     if (stage >= STAGE_MSYS) {
         r_esp_ble_msys_deinit();        /* HCI callbacks stay: they drop */
@@ -713,7 +731,7 @@ static int espb_power_up(void) {
 
     /* Enable: the PHY for BLE, the baseband, the flash-only timing. */
     espw_phy_bt_enable();
-    tiku_esp32c61_sleep_hold(1);
+    espw_arch_sleep_hold(1);
     bt_bb_v2_init_cmplx(1U);
 #if ESPW_COEX
     (void)coex_enable();
@@ -795,7 +813,7 @@ void tiku_drv_ble_esp_status(tiku_drv_ble_esp_status_t *out) {
 /*---------------------------------------------------------------------------*/
 
 static int espb_init(void) {
-    if (!tiku_esp32c61_xip_ok()) {
+    if (!espw_arch_xip_ok()) {
         ESPB_PRINTF("xip.bin in flash is not this build's -- make flash "
                     "writes both images\n");
         return TIKU_DRV_ERR_NOT_PRESENT;

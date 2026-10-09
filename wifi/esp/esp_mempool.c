@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <arch/esp32c61/tiku_irq_arch.h>
+#include "esp_arch.h"
 #include "esp_ble_abi.h"
 
 #define POOL_ALIGN      4U
@@ -41,7 +41,7 @@ static void pool_chain(struct os_mempool *mp) {
 }
 
 os_error_t os_mempool_unregister(struct os_mempool *mp) {
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
     os_error_t rc = OS_INVALID_PARM;
 
     for (struct os_mempool **l = &pool_list; *l != NULL; l = &(*l)->mp_next) {
@@ -52,7 +52,7 @@ os_error_t os_mempool_unregister(struct os_mempool *mp) {
             break;
         }
     }
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return rc;
 }
 
@@ -68,7 +68,7 @@ static os_error_t pool_init(struct os_mempool *mp, uint16_t blocks,
     if (((uintptr_t)membuf & (POOL_ALIGN - 1U)) != 0U) {
         return OS_MEM_NOT_ALIGNED;
     }
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     for (l = &pool_list; *l != NULL;) {
         if (*l == mp || (*l)->name == name) {
             *l = (*l)->mp_next;         /* made again: the old one goes */
@@ -84,7 +84,7 @@ static os_error_t pool_init(struct os_mempool *mp, uint16_t blocks,
     pool_chain(mp);
     mp->mp_next = NULL;
     *l = mp;                            /* l is the list's end */
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return OS_OK;
 }
 
@@ -127,9 +127,9 @@ os_error_t os_mempool_clear(struct os_mempool *mp) {
     if (mp == NULL) {
         return OS_INVALID_PARM;
     }
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     pool_chain(mp);
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return OS_OK;
 }
 
@@ -164,7 +164,7 @@ void *os_memblock_get(struct os_mempool *mp) {
             return mpe->mpe_get_cb(mpe, mpe->mpe_get_arg);
         }
     }
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     if (mp->mp_num_free != 0U && mp->mp_first != NULL) {
         b = mp->mp_first;
         mp->mp_first = b->mb_next;
@@ -173,7 +173,7 @@ void *os_memblock_get(struct os_mempool *mp) {
             mp->mp_min_free = mp->mp_num_free;
         }
     }
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return b;
 }
 
@@ -187,7 +187,7 @@ static os_error_t pool_put(struct os_mempool *mp, void *p) {
     if ((mp->mp_flags & OS_MEMPOOL_F_FRAG) == 0U && !pool_owns(mp, p)) {
         return OS_INVALID_PARM;
     }
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     if (mp->mp_num_free < mp->mp_num_blocks) {
         struct os_memblock *f = mp->mp_first;
 
@@ -201,7 +201,7 @@ static os_error_t pool_put(struct os_mempool *mp, void *p) {
             rc = OS_OK;
         }
     }
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return rc;
 }
 

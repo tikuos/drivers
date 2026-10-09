@@ -3,7 +3,7 @@
 This component controls the C5 radio's physical layer: initial calibration,
 warm wake, and RF shutdown. An optional Wi-Fi build uses C5 vendor libraries
 with the shared TikuOS OS adapter and C5 interrupt, clock and timer bindings.
-There is no ESP-IDF or FreeRTOS runtime dependency. IEEE 802.15.4 and simultaneous-radio
+There is no ESP-IDF or FreeRTOS runtime dependency. An opt-in profile provides BLE. IEEE 802.15.4 and simultaneous-radio
 coexistence are not provided.
 
 ## Build
@@ -18,7 +18,7 @@ make MCU=esp32c5 HAS_DRIVERS=1 TIKU_DRV_PHY_C5_ENABLE=1 \
 ```
 
 The driver is optional and does not enable RF at boot. A PHY-only diagnostic
-executes from internal SRAM; the Wi-Fi build requires XIP for ordinary vendor
+executes from internal SRAM; the Wi-Fi and BLE builds require XIP for ordinary vendor
 code and constants. `fetch.sh` downloads the Apache-2.0 PHY
 library pinned by ESP-IDF `4d59230ddff16327812782151ef0afef202dc6d7`:
 `esp-phy-lib` commit `20f1db053a0e6cb9f1c09d255c43bf42483041d0`.
@@ -67,6 +67,53 @@ reception or assign a confirmed cause. Association and packet traffic are not
 tested. Keep this opt-in adapter experimental until reception is reproduced
 against a nearby controlled AP and the board's antenna is checked.
 
+## BLE
+
+```sh
+sh drivers/wifi/esp/c5/fetch.sh --ble
+make MCU=esp32c5 HAS_DRIVERS=1 HAS_TIKUKITS=1 HAS_TESTS=0 HAS_EXAMPLES=0 \
+    TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_ESP32C5_XIP_CODE=1 \
+    TIKU_DRV_BLE_ESP_ENABLE=1 BUILD_DIR=build/esp32c5-ble \
+    TOOLCHAIN_DIR=/path/to/riscv-toolchain TOOLCHAIN_PREFIX=riscv-none-elf- \
+    ESP_PYTHON=/path/to/venv/bin/python ESPTOOL=/path/to/venv/bin/esptool
+```
+
+The controller archive is `esp32c5-bt-lib`
+`0b5cb2d7cfb4078e951da36a695bc4fb37e52391`. Its PHY/baseband archives use the
+PHY revision above. `SHA256SUMS-ble` checks these and their licenses. C61
+controller archives and ROM bindings must not be substituted.
+
+Install the matching boot/XIP pair, then use `bt on`, `bt scan`, `bt list`,
+`bt scan stop`, `bt advertise <name>`, `bt connect <scan-slot>`, `bt discover`,
+`bt disconnect` and `bt off`. Scan slots start at 1. `bt uart <name>` exposes
+the wireless shell; Ctrl-C on USB ends that session. The controller uses a
+40 KiB SRAM heap and TikuOS worker threads; shutdown joins its deleted worker
+before freeing the environment it references. The heap is returned on shutdown.
+
+The controller uses the actual 40/48 MHz crystal selection, the 40 MHz AHB
+clock and a 100 kHz low-power clock. The common PHY enables its Wi-Fi-power,
+coexistence and analog-I2C clocks before calibration. A scoped APM master-4
+mode change permits modem DMA into kernel SRAM; shutdown restores that mode.
+It does not disable global access filters or replace locked security settings.
+
+TikuBench's `bt` suite accepts `--board esp32c5` in both frontends. Hardware
+checks cover HCI, identity, advertisement commands, actual scan reception,
+VFS state and full SRAM recovery. A C5 central connection to a temporary
+BlueZ peripheral also exchanged GATT reads and advancing uptime notifications
+over the air (`bt --only 27`). Short peer-discovery runs were inconsistent;
+received host RSSI ranged down to -95 dBm. A passing exchange does not
+establish reliable range or sustained throughput.
+Later runs also connected and then received a remote disconnect before GATT
+discovery. BlueZ retained `Connected=yes` while the C5 radio was off and the
+host's HCI connection list was empty. That test environment needs recovery
+before a repeatability claim; do not suppress failed peer tests.
+The host-to-C5 UART test remains a separate qualification: runs fail at
+advertisement discovery or connection. This host logs malformed advertising
+report types; discovery also failed with a pinned SDK reference image. These
+observations do not establish the cause or qualify C5 peripheral operation.
+Pairing/encryption, throughput and Wi-Fi/BLE coexistence are not qualified.
+Enabling Wi-Fi and BLE together is a build error.
+
 ## Calls and ownership
 
 Call `tiku_drv_phy_c5_on()` from kernel foreground with interrupts enabled.
@@ -88,7 +135,7 @@ Its rate-group power ceilings are 10 dBm. This is not regulatory certification
 or a Wi-Fi country/channel policy. Calibration may emit RF. The PHY-only
 build does not start a MAC, scan, associate, advertise or track temperature
 automatically. The optional Wi-Fi adapter starts the MAC and adds periodic
-PHY tracking. There is no C5 raw-radio
+PHY tracking. BLE uses its own controller adapter. There is no C5 raw-radio
 transmit API.
 
 The vendor calibration and wake calls are blocking. On a calibration error

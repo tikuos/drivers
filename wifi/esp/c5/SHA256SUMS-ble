@@ -1,0 +1,4 @@
+8ddce4072d4182410115ce9409e3239caab0e5eae6c67745de7238c388d7c6e9  vendor/libble_app.a
+ebd002217a1a76e3cce23cd89d0916477da6c7907a6a46c8a7f1fb209e3cb333  vendor/NOTICE-ble
+9cbaf5bce18e6190dfab3213d2ecc65e2a5dd8bbde48bf5218dbbf47cc23da11  vendor/libbtbb.a
+f9898f640d246b13e0962b20b2911a1db919911e273d6e70ba8e51f8a29f63c1  vendor/esp32c5.rom.api.ld

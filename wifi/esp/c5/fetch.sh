@@ -4,7 +4,7 @@
 # fetch.sh - fetch pinned ESP32-C5 PHY assets and verify their SHA-256 hashes.
 # SPDX-License-Identifier: Apache-2.0
 set -eu
-case "${1-}" in ""|--wifi|--all) ;; *) echo "usage: $0 [--wifi|--all]" >&2; exit 2;; esac
+case "${1-}" in ""|--wifi|--ble|--all) ;; *) echo "usage: $0 [--wifi|--ble|--all]" >&2; exit 2;; esac
 cd "$(dirname "$0")"
 PHY=https://raw.githubusercontent.com/espressif/esp-phy-lib/20f1db053a0e6cb9f1c09d255c43bf42483041d0
 ROM=https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c5/ld
@@ -32,5 +32,17 @@ if [ "${1-}" = --wifi ] || [ "${1-}" = --all ]; then
         sha256sum -c SHA256SUMS-wifi
     else
         shasum -a 256 -c SHA256SUMS-wifi
+    fi
+fi
+if [ "${1-}" = --ble ] || [ "${1-}" = --all ]; then
+    BT=https://raw.githubusercontent.com/espressif/esp32c5-bt-lib/0b5cb2d7cfb4078e951da36a695bc4fb37e52391
+    curl --fail --location --max-time 60 -o vendor/libble_app.a "$BT/libble_app.a"
+    curl --fail --location --max-time 60 -o vendor/NOTICE-ble "$BT/NOTICE"
+    curl --fail --location --max-time 60 -o vendor/libbtbb.a "$PHY/esp32c5/libbtbb.a"
+    curl --fail --location --max-time 60 -o vendor/esp32c5.rom.api.ld "$ROM/esp32c5.rom.api.ld"
+    if command -v sha256sum > /dev/null; then
+        sha256sum -c SHA256SUMS-ble
+    else
+        shasum -a 256 -c SHA256SUMS-ble
     fi
 fi

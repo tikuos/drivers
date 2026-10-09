@@ -1,5 +1,5 @@
 # C5 PHY calibration and RF lifecycle, independent of the C61 MAC adapters.
-ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE)))),)
+ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)))),)
 ifneq ($(MCU),esp32c5)
 $(error TIKU_DRV_PHY_C5_ENABLE requires MCU=esp32c5)
 endif
@@ -16,7 +16,7 @@ ifneq ($(C5_PHY_HASH_OK),yes)
 $(error C5 PHY asset checksum mismatch: run sh $(C5_PHY_DIR)/fetch.sh)
 endif
 SRCS += $(C5_PHY_DIR)/tiku_drv_phy_c5.c
-ifeq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE)),)
+ifeq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 SRCS += $(C5_PHY_DIR)/phy_c5_glue.c
 endif
 CFLAGS += -DTIKU_DRV_PHY_C5_ENABLE=1
@@ -25,9 +25,12 @@ LDLIBS += -Wl,--start-group $(C5_PHY_DIR)/vendor/libphy.a -lc -lgcc -Wl,--end-gr
 endif
 
 ifeq ($(MCU),esp32c5)
-ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE)),)
+ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 ifneq ($(TIKU_THREADS_ENABLE):$(TIKU_ESP32C5_XIP_CODE),1:1)
 $(error C5 radios require TIKU_THREADS_ENABLE=1 TIKU_ESP32C5_XIP_CODE=1)
+endif
+ifeq ($(TIKU_DRV_WIFI_ESP_ENABLE):$(TIKU_DRV_BLE_ESP_ENABLE),1:1)
+$(error C5 simultaneous Wi-Fi/BLE requires a qualified coexistence adapter)
 endif
 SRCS += $(addprefix drivers/wifi/esp/,esp_core.c esp_osi.c esp_heap.c \
     esp_glue.c c5/wifi_c5_arch.c c5/wifi_c5_phy.c)
@@ -49,6 +52,18 @@ SRCS += $(addprefix tikukits/crypto/,sha1/tiku_kits_crypto_sha1.c \
 CFLAGS += -DTIKU_DRV_WIFI_ESP_ENABLE=1
 LDFLAGS += $(addprefix -T$(C5_PHY_DIR)/vendor/esp32c5.rom.,coexist.ld net80211.ld pp.ld)
 LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libnet80211.a libpp.a libcore.a libphy.a) -lm -lc -lgcc -Wl,--end-group
+endif
+ifeq ($(TIKU_DRV_BLE_ESP_ENABLE),1)
+C5_BLE_HASH_OK := $(shell cd $(C5_PHY_DIR) && \
+    { if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS-ble; \
+      else shasum -a 256 -c SHA256SUMS-ble; fi; } >/dev/null 2>&1 && echo yes)
+ifneq ($(C5_BLE_HASH_OK),yes)
+$(error C5 BLE assets missing or invalid: run sh $(C5_PHY_DIR)/fetch.sh --ble)
+endif
+SRCS += $(addprefix drivers/wifi/esp/,esp_ble.c esp_npl.c esp_mempool.c)
+SRCS += tikukits/crypto/p256/tiku_kits_crypto_p256.c
+CFLAGS += -DTIKU_DRV_BLE_ESP_ENABLE=1
+LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libble_app.a libbtbb.a libphy.a) -lm -lc -lgcc -Wl,--end-group
 endif
 endif
 endif
