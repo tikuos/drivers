@@ -53,6 +53,9 @@ extern void set_bb_wdg(bool, bool, unsigned, unsigned, bool, bool, bool);
 extern void phy_pbus_xpd_tx_off(void);
 extern void phy_set_rxclk_en(unsigned on);
 extern int phy_stop_tx_tone(unsigned arg);
+extern void phy_wifi_enable_set(unsigned on);
+extern void phy_pbus_debugmode(void);
+extern void phy_pbus_xpd_rx_on(unsigned on);
 
 static uint32_t saved_wifi;
 static uint8_t active, changing;
@@ -98,11 +101,21 @@ int tiku_sdr_c5_power(int on)
         saved_wifi = TIKU_C5_REG_READ(WIFI_CLOCKS);
         TIKU_C5_REG_WRITE(WIFI_CLOCKS, saved_wifi | 0x7ffu);
         TIKU_C5_IRQ_RESTORE(state);
+        /* Without a MAC the power bus's work mode leaves the receiver off and
+         * every sample is one DC value: debug mode powers it by hand.  The
+         * baseband's forced gain index does not reach the RF chain in this
+         * mode, and the sample words carry a gain field of 0. */
+        phy_wifi_enable_set(1);
+        phy_pbus_debugmode();
+        phy_pbus_xpd_tx_off();
+        phy_pbus_xpd_rx_on(1);
         active = 1;
     } else {
         phy_force_rx_gain(0, 0);
+        phy_pbus_xpd_rx_on(0);
         phy_pbus_xpd_tx_off();
         phy_pbus_workmode();
+        phy_wifi_enable_set(0);
         if (tiku_drv_phy_c5_off() != 0) { leave(); return -1; }
         state = TIKU_C5_IRQ_SAVE();
         TIKU_C5_REG_WRITE(WIFI_CLOCKS,
@@ -174,8 +187,11 @@ int tiku_sdr_c5_capture(uint32_t mhz, uint8_t rate, uint32_t words,
     phy_mac_enable_bb(1);
     phy_set_chanfreq(mhz, rate == 0 ? 1u : 0u);
     (void)phy_stop_tx_tone(1);
-    phy_pbus_workmode();
+    /* The tone stop returns the power bus to work mode: back to debug mode
+     * with the receiver powered before every capture. */
+    phy_pbus_debugmode();
     phy_pbus_xpd_tx_off();
+    phy_pbus_xpd_rx_on(1);
     phy_set_rxclk_en(1);
     limit = (TIKU_C5_REG_READ(0x600A702Cu) >> 8) & 127u;
     if (limit > 89u) { limit = 89u; }

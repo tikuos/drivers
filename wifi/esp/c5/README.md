@@ -128,7 +128,13 @@ make MCU=esp32c5 HAS_DRIVERS=1 HAS_TIKUKITS=0 HAS_TESTS=0 HAS_EXAMPLES=0 \
 This profile needs the PHY assets, not the Wi-Fi or BLE controller, and
 enabling either radio with it is a build error. The
 receiver reserves the entire 128 KiB bank at `0x40820000..0x4083ffff` before
-powering the PHY. Samples occupy its upper 64 KiB, starting at `0x40830000`.
+powering the PHY. With no MAC running, the PHY's power bus is switched to its
+debug mode and the receive chain powered by hand (`phy_pbus_xpd_rx_on`); in
+work mode the MAC's state machine would leave the receiver off and every
+sample would be one DC value. In debug mode the baseband's forced gain index
+does not reach the RF chain, so `sdr gain` does not change the receiver's
+gain and captures report a gain of 0; the `sdr` suite records this as a
+skip. Samples occupy its upper 64 KiB, starting at `0x40830000`.
 The linker refuses a firmware whose allocator cannot own that whole bank.
 Startup also checks the allocated address. Do not weaken either check to fit
 more services: the dump engine takes hardware ownership of the entire bank.

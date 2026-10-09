@@ -160,8 +160,12 @@ int tiku_drv_phy_c5_on(void)
         result = TIKU_C5_PHY_BUSY;
         goto done;
     }
+    /* The PLL feeds the modem; the kernel runs the CPU from it (PCR
+     * SYSCLK_CONF source 3) whenever it is up. */
     xtal = (TIKU_C5_REG_READ(0x60096110u) >> 24) & 127u;
-    if ((xtal != 40u && xtal != 48u) || tiku_c5_systimer_read(&start) != 0) {
+    if ((xtal != 40u && xtal != 48u) ||
+        ((TIKU_C5_REG_READ(0x60096110u) >> 16) & 3u) != 3u ||
+        tiku_c5_systimer_read(&start) != 0) {
         result = TIKU_C5_PHY_CLOCK;
         goto done;
     }
