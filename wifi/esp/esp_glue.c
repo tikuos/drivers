@@ -16,6 +16,9 @@
 
 #include <hal/tiku_printf_hal.h>
 #include "esp_abi.h"
+#if defined(PLATFORM_ESP32C5)
+#include <arch/esp32c5/tiku_esp32c5_regs.h>
+#endif
 
 /* Event base name the stack posts its events under. */
 const char *WIFI_EVENT = "WIFI_EVENT";
@@ -99,7 +102,11 @@ void abort(void) {
 
 /** @brief The crystal, in MHz: the DevKitC's is 40. */
 uint32_t rtc_clk_xtal_freq_get(void) {
+#if defined(PLATFORM_ESP32C5)
+    return (TIKU_C5_REG_READ(0x60096110u) >> 24) & 127u;
+#else
     return 40U;
+#endif
 }
 
 /** @brief Hex text to bytes, two digits each; -1 on a stray character. */
@@ -128,6 +135,10 @@ int hexstr2bin(const char *hex, uint8_t *buf, size_t len) {
 
 /* The ECO4 ROM keeps this pointer itself; on ECO3 it lives here. */
 void *s_offchan_tx_progress_in_ptr;
+#if defined(PLATFORM_ESP32C5)
+/* C5 ECO3's PHY dispatch pointer is supplied by the application on ECO2. */
+void *s_phy_get_max_pwr_new_ptr;
+#endif
 
 /* ESP-NOW's vendor OUI, and mesh's auth timer: neither is used. */
 uint8_t g_espnow_user_oui[3] = { 0x18, 0xFE, 0x34 };
@@ -141,6 +152,7 @@ int mesh_sta_auth_expire_time(void) {
  * "01" is the world-safe default it starts in. */
 #define RULE(first, last, bw, dbm) { (first), (last), (bw), (dbm), 0, 0 }
 
+#if !defined(PLATFORM_ESP32C5)
 const wifi_regulatory_t regulatory_data[] = {
     { 1, { RULE(1, 11, 2, 20) } },                      /* 0: world */
     { 1, { RULE(1, 13, 2, 20) } },                      /* 1: Europe, CN */
@@ -158,9 +170,24 @@ const wifi_regdomain_t regdomain_table[] = {
     { { 'I', 'N' }, 6 },
     { { '#', '#' }, sizeof regulatory_data / sizeof regulatory_data[0] },
 };
+#endif
 
 /* FTM's per-bandwidth delay compensation, unused without FTM. */
 #define FTM_COMP(name) const int32_t name = 0
+#if defined(PLATFORM_ESP32C5)
+FTM_COMP(est_PHY_INIT_FTM_COMP_20_20_MHZ_5G);
+FTM_COMP(est_PHY_INIT_FTM_COMP_20_20_MHZ_5G_DIS);
+FTM_COMP(est_PHY_INIT_FTM_COMP_20_40_MHZ_5G);
+FTM_COMP(est_PHY_INIT_FTM_COMP_20_40_MHZ_5G_DIS);
+FTM_COMP(est_PHY_INIT_FTM_COMP_40_40_MHZ_5G);
+FTM_COMP(est_PHY_INIT_FTM_COMP_40_40_MHZ_5G_DIS);
+FTM_COMP(est_PHY_RESP_FTM_COMP_20_20_MHZ_5G);
+FTM_COMP(est_PHY_RESP_FTM_COMP_20_20_MHZ_5G_DIS);
+FTM_COMP(est_PHY_RESP_FTM_COMP_20_40_MHZ_5G);
+FTM_COMP(est_PHY_RESP_FTM_COMP_20_40_MHZ_5G_DIS);
+FTM_COMP(est_PHY_RESP_FTM_COMP_40_40_MHZ_5G);
+FTM_COMP(est_PHY_RESP_FTM_COMP_40_40_MHZ_5G_DIS);
+#endif
 FTM_COMP(est_PHY_INIT_FTM_COMP_20_20D_MHZ);
 FTM_COMP(est_PHY_INIT_FTM_COMP_20_20D_MHZ_DIS);
 FTM_COMP(est_PHY_INIT_FTM_COMP_20_20U_MHZ);

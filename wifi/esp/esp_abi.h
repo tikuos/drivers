@@ -295,9 +295,13 @@ _Static_assert(offsetof(wifi_init_config_t, magic) == 156, "init");
 #define ESP_MAC_WIFI_SOFTAP         1U
 #define ESP_MAC_BT                  2U
 
-/** @brief The PHY's 128 bytes of defaults, and what calibration keeps. */
+/** @brief Target-specific PHY parameters, and what calibration keeps. */
 typedef struct {
+#if defined(PLATFORM_ESP32C5)
+    uint8_t params[256];
+#else
     uint8_t params[128];
+#endif
 } esp_phy_init_data_t;
 
 typedef struct {
@@ -417,7 +421,11 @@ typedef struct {
     uint32_t second;            /* the secondary channel's side */
     int8_t   rssi;
     uint32_t authmode;
+#if defined(PLATFORM_ESP32C5)
+    uint8_t  rest[44];          /* country includes the 5 GHz channel mask */
+#else
     uint8_t  rest[40];
+#endif
 } wifi_ap_record_t;
 
 /** @brief WIFI_EVENT_SCAN_DONE's data: 0 on success, and the APs found. */
@@ -440,7 +448,11 @@ typedef struct {
 
 typedef struct {
     uint8_t         n_reg_rules;
+#if defined(PLATFORM_ESP32C5)
+    wifi_reg_rule_t reg_rules[7];
+#else
     wifi_reg_rule_t reg_rules[2];
+#endif
 } wifi_regulatory_t;
 
 /** @brief A country code and the rules it follows; "##" ends the table. */
@@ -450,20 +462,42 @@ typedef struct {
 } wifi_regdomain_t;
 
 #if defined(__riscv) && __riscv_xlen == 32
+#if defined(PLATFORM_ESP32C5)
+_Static_assert(sizeof(wifi_ap_record_t) == 96, "C5 AP record size");
+#else
 _Static_assert(sizeof(wifi_ap_record_t) == 92, "AP record size");
+#endif
 _Static_assert(offsetof(wifi_ap_record_t, ssid) == 6, "ap");
 _Static_assert(offsetof(wifi_ap_record_t, primary) == 39, "ap");
 _Static_assert(offsetof(wifi_ap_record_t, rssi) == 44, "ap");
 _Static_assert(offsetof(wifi_ap_record_t, authmode) == 48, "ap");
 _Static_assert(sizeof(wifi_event_sta_scan_done_t) == 8, "scan done size");
 _Static_assert(sizeof(wifi_reg_rule_t) == 4, "rule size");
+#if defined(PLATFORM_ESP32C5)
+_Static_assert(sizeof(wifi_regulatory_t) == 30, "C5 regulatory size");
+#else
 _Static_assert(sizeof(wifi_regulatory_t) == 10, "regulatory size");
+#endif
 _Static_assert(sizeof(wifi_regdomain_t) == 3, "regdomain size");
 #endif
 
 /** @brief libnet80211: scan every channel the country allows (a NULL
  *         config: active, default dwell), done with WIFI_EVENT_SCAN_DONE. */
-esp_err_t esp_wifi_scan_start(const void *config, bool block);
+typedef struct {
+    uint8_t *ssid, *bssid;
+    uint8_t channel;
+    bool show_hidden;
+    uint32_t scan_type;
+    struct { struct { uint32_t min, max; } active; uint32_t passive; } scan_time;
+    uint8_t home_chan_dwell_time;
+    struct { uint16_t ghz_2_channels; uint32_t ghz_5_channels; } channel_bitmap;
+    bool coex_background_scan;
+    uint8_t max_scan_ap_num;
+} wifi_scan_config_t;
+#if defined(__riscv) && __riscv_xlen == 32
+_Static_assert(sizeof(wifi_scan_config_t) == 44, "scan configuration ABI");
+#endif
+esp_err_t esp_wifi_scan_start(const wifi_scan_config_t *config, bool block);
 esp_err_t esp_wifi_scan_stop(void);
 esp_err_t esp_wifi_scan_get_ap_num(uint16_t *number);
 

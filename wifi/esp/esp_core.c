@@ -12,13 +12,19 @@
 #include <stdint.h>
 
 #include <kernel/memory/tiku_mem.h>
+#if defined(PLATFORM_ESP32C5)
+#include <arch/esp32c5/tiku_psram_arch.h>
+#include "esp_arch.h"
+#else
 #include <arch/esp32c61/tiku_psram_arch.h>
+#endif
 #include "esp_heap.h"
 #include "esp_port.h"
 
 static uint8_t      core_radios;
 static uint8_t      core_heap_taken;
 static uint8_t      core_ext_taken;
+static uint8_t      core_osi_started;
 static tiku_arena_t core_heap_arena;
 static tiku_arena_t core_ext_arena;
 
@@ -37,7 +43,11 @@ static const char *core_name(uint8_t radio) {
 static void core_ext_take(uint32_t bytes) {
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
 
+#if defined(PLATFORM_ESP32C5)
+    if (tiku_c5_psram_attach() != 0) {
+#else
     if (tiku_esp32c61_psram_attach() != TIKU_ESP32C61_PSRAM_OK) {
+#endif
         TIKU_PRINTF("[esp] no PSRAM: packet buffers come from SRAM\n");
         return;
     }
@@ -56,6 +66,10 @@ static void core_ext_take(uint32_t bytes) {
 int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
 
+    if (core_radios == 0U && core_osi_started) {
+        TIKU_PRINTF("[esp] previous radio workers still active; restart refused\n");
+        return -1;
+    }
     if (core_radios != 0U) {
         /* The other radio is up: everything below stands already. */
         if (ext_bytes != 0U && !core_ext_taken) {
@@ -83,7 +97,15 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     if (ext_bytes != 0U && !core_ext_taken) {
         core_ext_take(ext_bytes);
     }
+#if defined(PLATFORM_ESP32C5)
+    if (espw_c5_radio_prepare() != 0) {
+        core_radios = radio;
+        espw_core_down(radio);
+        return -1;
+    }
+#endif
     espw_modem_init();
+    core_osi_started = 1U;
     if (espw_osi_start() != 0) {
         core_radios = radio;
         espw_core_down(radio);
@@ -103,7 +125,11 @@ void espw_core_down(uint8_t radio) {
     if (core_radios != 0U) {
         return;
     }
-    ended = espw_osi_stop() == 0;
+    ended = !core_osi_started || espw_osi_stop() == 0;
+    if (ended) { core_osi_started = 0U; }
+#if defined(PLATFORM_ESP32C5)
+    if (ended) { espw_c5_radio_release(); }
+#endif
     if (ended && espw_heap_used() == 0U) {
         espw_heap_reset();
         (void)tiku_mem_workspace_close(&core_heap_arena);

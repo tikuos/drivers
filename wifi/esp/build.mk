@@ -7,6 +7,7 @@
 # Their code links into the XIP window (the esp_*xip.ld fragments) and
 # `make flash` writes it as xip.bin beside the boot image.
 
+ifneq ($(MCU),esp32c5)
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 ifneq ($(MCU),esp32c61)
 $(error wifi/esp: the Espressif radio libraries are built for MCU=esp32c61)
@@ -97,4 +98,5 @@ endif
 # so their libc calls resolve whatever order the kernel's group left.
 LDFLAGS += $(addprefix -T,$(ESPW_ROMLDS))
 LDLIBS  += -Wl,--start-group $(ESPW_LIBS) -lm -lc -lgcc -Wl,--end-group
+endif
 endif

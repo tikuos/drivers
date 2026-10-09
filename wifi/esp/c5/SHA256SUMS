@@ -1,0 +1,5 @@
+dbf33c418c8d408d4005c849d12a1432deea82e2e5e57de3c8ddf914d104fffb  vendor/libphy.a
+787e1007dd0bda4f438aaad53a12addc09f8fecb4db27911e6d100d365eef440  vendor/esp32c5.rom.ld
+58feb442aa4b1cc48377feaada8de39baaca6dcbfe3112ceed95af4905716bae  vendor/esp32c5.rom.phy.ld
+23cd17dd0fd04233ab90032374de646e265d76122f4b6afbcbea75963de12b88  vendor/esp32c5.rom.version.ld
+cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  vendor/LICENSE-phy

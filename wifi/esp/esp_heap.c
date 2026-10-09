@@ -17,7 +17,7 @@
 #include <string.h>
 
 #include <hal/tiku_printf_hal.h>
-#include <arch/esp32c61/tiku_irq_arch.h>
+#include "esp_arch.h"
 #include "esp_heap.h"
 
 #define HDR         8U                  /* size word + magic, keeps 8-align */
@@ -92,7 +92,7 @@ static int region_add(espw_region_t *r, void *base, uint32_t len) {
     if (i == SPANS || len < MIN_BLOCK) {
         return -1;
     }
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     r->base[i] = (uint8_t *)b;
     r->len[i] = len;
     r->size += len;
@@ -100,15 +100,15 @@ static int region_add(espw_region_t *r, void *base, uint32_t len) {
     r->low += len;
     ((espw_blk_t *)b)->size = len;
     region_insert(r, (espw_blk_t *)b);
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return 0;
 }
 
 static void region_reset(espw_region_t *r) {
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     memset(r, 0, sizeof *r);
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 /** @brief Whether @p p lies in one of @p r's blocks. */
@@ -136,7 +136,7 @@ static void *region_alloc(espw_region_t *r, size_t n, int count_fail) {
         return NULL;
     }
     need = (((uint32_t)n + 7U) & ~7UL) + HDR;
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     for (link = &r->free_list; (b = *link) != NULL; link = &b->next) {
         if (b->size < need) {
             continue;
@@ -162,7 +162,7 @@ static void *region_alloc(espw_region_t *r, size_t n, int count_fail) {
     if (hdr == NULL && count_fail) {
         r->fails++;
     }
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
     return hdr != NULL ? (uint8_t *)hdr + HDR : NULL;
 }
 
@@ -182,7 +182,7 @@ static espw_region_t *region_of(void *p, uint32_t **hdr_out) {
 }
 
 static void region_stats(const espw_region_t *r, espw_heap_stats_t *out) {
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
     uint32_t big = 0U;
 
     for (espw_blk_t *b = r->free_list; b != NULL; b = b->next) {
@@ -195,7 +195,7 @@ static void region_stats(const espw_region_t *r, espw_heap_stats_t *out) {
     out->low = r->low;
     out->largest = big > HDR ? big - HDR : 0U;
     out->fails = r->fails;
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -272,11 +272,11 @@ void espw_free(void *p) {
     if (p == NULL || (r = region_of(p, &hdr)) == NULL) {
         return;
     }
-    m = tiku_esp32c61_mie_off();
+    m = espw_arch_mie_off();
     hdr[1] = 0U;
     r->free_bytes += hdr[0];
     region_insert(r, (espw_blk_t *)hdr);
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 static void *realloc_in(void *(*alloc)(size_t), void *p, size_t n) {
@@ -327,7 +327,7 @@ void *espw_obj_alloc(size_t n) {
     void *p = NULL;
 
     if (n <= OBJ_BYTES) {
-        m = tiku_esp32c61_mie_off();
+        m = espw_arch_mie_off();
         for (unsigned i = 0U; i < OBJ_SLOTS; i++) {
             if ((obj_used & (1ULL << i)) == 0U) {
                 obj_used |= 1ULL << i;
@@ -335,7 +335,7 @@ void *espw_obj_alloc(size_t n) {
                 break;
             }
         }
-        tiku_esp32c61_mie_restore(m);
+        espw_arch_mie_restore(m);
     }
     if (p != NULL) {
         memset(p, 0, OBJ_BYTES);
@@ -349,9 +349,9 @@ void espw_obj_free(void *p) {
     uint32_t m;
 
     if (a >= base && a < base + sizeof obj_pool) {
-        m = tiku_esp32c61_mie_off();
+        m = espw_arch_mie_off();
         obj_used &= ~(1ULL << ((a - base) / OBJ_BYTES));
-        tiku_esp32c61_mie_restore(m);
+        espw_arch_mie_restore(m);
         return;
     }
     espw_free(p);

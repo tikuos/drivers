@@ -15,18 +15,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <hal/tiku_cpu.h>
 #include <kernel/threads/tiku_thread.h>
 #include <kernel/timers/tiku_clock.h>
-#include <arch/esp32c61/tiku_crt_early.h>
-#include <arch/esp32c61/tiku_cpu_freq_boot_arch.h>
-#include <arch/esp32c61/tiku_irq_arch.h>
-#include <arch/esp32c61/tiku_sleep_arch.h>
-#include <arch/esp32c61/tiku_timer_arch.h>
-#include <arch/esp32c61/tiku_trng_arch.h>
-#include <arch/esp32c61/tiku_esp32c61_regs.h>
+#include "esp_arch.h"
 
 #include "esp_heap.h"
 #include "esp_port.h"
@@ -38,15 +33,15 @@
 #define OSI_MAX_PRIORITY    25
 #define OSI_TASK_MARGIN     1024U       /* stack the adapter's own frames use */
 #define OSI_TIMER_STACK     3072U
-#define OSI_LIB_LINES       (TIKU_ESP32C61_LINES_RADIO - 1U)
-#define COUNTS_PER_US       (ESP32C61_SYSTIMER_HZ / 1000000UL)
+#define OSI_LIB_LINES       (ESPW_ARCH_LINES_RADIO - 1U)
+#define COUNTS_PER_US       (ESPW_ARCH_SYSTIMER_HZ / 1000000UL)
 
 /* Bring-up trace: tasks, interrupt routing, and every wait that blocks. */
 #ifndef ESPW_TRACE
 #define ESPW_TRACE 0
 #endif
 #if ESPW_TRACE
-#define TRACE(...) do { if (!tiku_esp32c61_in_isr()) ESPW_PRINTF(__VA_ARGS__); } while (0)
+#define TRACE(...) do { if (!espw_arch_in_isr()) ESPW_PRINTF(__VA_ARGS__); } while (0)
 #else
 #define TRACE(...) do { } while (0)
 #endif
@@ -73,8 +68,8 @@ static void trace_workers(void) {
         if (t != NULL && t->sp != NULL) {
             ESPW_PRINTF("  %s: state %u pc 0x%08lx ra 0x%08lx\n", t->name,
                         (unsigned)t->state,
-                        (unsigned long)t->sp[TIKU_ESP32C61_F_MEPC],
-                        (unsigned long)t->sp[TIKU_ESP32C61_F_RA]);
+                        (unsigned long)t->sp[ESPW_ARCH_F_MEPC],
+                        (unsigned long)t->sp[ESPW_ARCH_F_RA]);
         }
     }
 #endif
@@ -98,7 +93,7 @@ int espw_deadline_wait(tiku_waitq_t *q, espw_deadline_t *d, uint32_t ms) {
     tiku_clock_time_t now;
     int woke;
 
-    if (ms == 0U || tiku_esp32c61_in_isr()) {
+    if (ms == 0U || espw_arch_in_isr()) {
         return 0;
     }
     TRACE("wait: %s on 0x%08lx, %ld ms\n", who(), (unsigned long)(uintptr_t)q,
@@ -640,7 +635,7 @@ static int32_t osi_task_get_max_priority(void) {
 }
 
 static bool osi_is_from_isr(void) {
-    return tiku_esp32c61_in_isr() != 0;
+    return espw_arch_in_isr() != 0;
 }
 
 /* A wake from a handler has pended the switch already. */
@@ -672,7 +667,7 @@ OSI_TRAMPOLINE(0)
 OSI_TRAMPOLINE(1)
 OSI_TRAMPOLINE(2)
 
-static const tiku_esp32c61_isr_t osi_irq_entry[OSI_LIB_LINES] = {
+static const espw_arch_isr_t osi_irq_entry[OSI_LIB_LINES] = {
     osi_irq_0, osi_irq_1, osi_irq_2
 };
 
@@ -695,7 +690,7 @@ static int osi_irq_slot(uint32_t n, int take) {
 }
 
 static unsigned osi_irq_line(int slot) {
-    return TIKU_ESP32C61_LINE_RADIO + 1U + (unsigned)slot;
+    return ESPW_ARCH_LINE_RADIO + 1U + (unsigned)slot;
 }
 
 static void osi_set_intr(int32_t cpu, uint32_t src, uint32_t n, int32_t prio) {
@@ -709,9 +704,9 @@ static void osi_set_intr(int32_t cpu, uint32_t src, uint32_t n, int32_t prio) {
     }
     TRACE("interrupt %lu: source %lu on line %u\n", (unsigned long)n,
           (unsigned long)src, osi_irq_line(i));
-    tiku_esp32c61_irq_attach(osi_irq_line(i), src, TIKU_ESP32C61_LEVEL_DEFAULT,
+    espw_arch_irq_attach(osi_irq_line(i), src, ESPW_ARCH_LEVEL_DEFAULT,
                              osi_irq_entry[i]);
-    tiku_esp32c61_irq_mark_flash(osi_irq_line(i), 1);
+    espw_arch_irq_mark_flash(osi_irq_line(i), 1);
 }
 
 static void osi_clear_intr(uint32_t src, uint32_t n) {
@@ -723,11 +718,11 @@ static void osi_set_isr(int32_t n, void *f, void *arg) {
     int i = osi_irq_slot((uint32_t)n, 1);
 
     if (i >= 0) {
-        uint32_t m = tiku_esp32c61_mie_off();
+        uint32_t m = espw_arch_mie_off();
 
         osi_irq[i].fn = (void (*)(void *))f;
         osi_irq[i].arg = arg;
-        tiku_esp32c61_mie_restore(m);
+        espw_arch_mie_restore(m);
     }
 }
 
@@ -737,7 +732,7 @@ static void osi_ints_on(uint32_t mask) {
         int i = (mask & (1UL << n)) ? osi_irq_slot(n, 0) : -1;
 
         if (i >= 0) {
-            tiku_esp32c61_irq_enable(osi_irq_line(i));
+            espw_arch_irq_enable(osi_irq_line(i));
         }
     }
 }
@@ -747,7 +742,7 @@ static void osi_ints_off(uint32_t mask) {
         int i = (mask & (1UL << n)) ? osi_irq_slot(n, 0) : -1;
 
         if (i >= 0) {
-            tiku_esp32c61_irq_disable(osi_irq_line(i));
+            espw_arch_irq_disable(osi_irq_line(i));
         }
     }
 }
@@ -762,19 +757,19 @@ static void osi_spin_lock_delete(void *lock) {
 
 static uint32_t osi_wifi_int_disable(void *mux) {
     (void)mux;
-    return tiku_esp32c61_mie_off();
+    return espw_arch_mie_off();
 }
 
 static void osi_wifi_int_restore(void *mux, uint32_t tmp) {
     (void)mux;
-    tiku_esp32c61_mie_restore(tmp);
+    espw_arch_mie_restore(tmp);
 }
 
 /*---------------------------------------------------------------------------*/
 /* Timers                                                                    */
 /*---------------------------------------------------------------------------*/
 
-/* The libraries' timer is IDF's ETSTimer, five words they leave to us. */
+/* The adapter provides the five-word ETSTimer layout used by the libraries. */
 typedef struct osi_timer {
     struct osi_timer *next;
     uint32_t          expire;       /* microseconds, wrapping */
@@ -792,7 +787,7 @@ uint32_t espw_irq_count(void) {
 }
 
 int64_t espw_time_us(void) {
-    return (int64_t)(tiku_cpu_esp32c61_systimer() / COUNTS_PER_US);
+    return (int64_t)(espw_arch_systimer() / COUNTS_PER_US);
 }
 
 static uint32_t now_us(void) {
@@ -805,12 +800,12 @@ static void timer_rearm(void) {
     int32_t ahead;
 
     if (osi_timers == NULL) {
-        tiku_esp32c61_alarm_disarm(TIKU_ESP32C61_ALARM_DRIVER);
+        espw_arch_alarm_disarm(ESPW_ARCH_ALARM_DRIVER);
         return;
     }
-    now = tiku_cpu_esp32c61_systimer();
+    now = espw_arch_systimer();
     ahead = (int32_t)(osi_timers->expire - (uint32_t)(now / COUNTS_PER_US));
-    tiku_esp32c61_alarm_arm(TIKU_ESP32C61_ALARM_DRIVER,
+    espw_arch_alarm_arm(ESPW_ARCH_ALARM_DRIVER,
                             now + (ahead > 0 ? (uint64_t)ahead * COUNTS_PER_US
                                              : 0U));
 }
@@ -839,34 +834,34 @@ static void timer_insert(osi_timer_t *t) {
 
 void espw_timer_setfn(void *ptimer, void *fn, void *arg) {
     osi_timer_t *t = ptimer;
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     timer_unlink(t);
     timer_rearm();
     t->fn = (void (*)(void *))fn;
     t->arg = arg;
     t->period = 0U;
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 void espw_timer_arm_us(void *ptimer, uint32_t us, bool repeat) {
     osi_timer_t *t = ptimer;
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     timer_unlink(t);
     t->expire = now_us() + us;
     t->period = repeat ? (us != 0U ? us : 1U) : 0U;
     timer_insert(t);
     timer_rearm();
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 void espw_timer_disarm(void *ptimer) {
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
 
     timer_unlink((osi_timer_t *)ptimer);
     timer_rearm();
-    tiku_esp32c61_mie_restore(m);
+    espw_arch_mie_restore(m);
 }
 
 static void osi_timer_arm(void *ptimer, uint32_t ms, bool repeat) {
@@ -880,7 +875,7 @@ static void osi_timer_done(void *ptimer) {
 
 /** @brief The driver alarm: whatever is due runs in the timer thread. */
 static void osi_timer_isr(void) {
-    tiku_esp32c61_alarm_disarm(TIKU_ESP32C61_ALARM_DRIVER);
+    espw_arch_alarm_disarm(ESPW_ARCH_ALARM_DRIVER);
     tiku_thread_wake_one(&osi_timer_wq);
 }
 
@@ -946,7 +941,11 @@ static uint32_t osi_free_heap(void) {
 static uint32_t osi_rand(void) {
     uint32_t v = 0U;
 
+#if defined(PLATFORM_ESP32C5)
+    if (espw_c5_random((uint8_t *)&v, sizeof(v)) != 0) { abort(); }
+#else
     (void)tiku_trng_arch_read_u32(&v);
+#endif
     return v;
 }
 
@@ -955,7 +954,11 @@ static unsigned long osi_random(void) {
 }
 
 static int osi_get_random(uint8_t *buf, size_t len) {
+#if defined(PLATFORM_ESP32C5)
+    return espw_c5_random(buf, len);
+#else
     return tiku_trng_arch_read_bytes(buf, len) == 0 ? 0 : -1;
+#endif
 }
 
 /* IDF's struct os_time: seconds as a 64-bit time_t, then microseconds. */
@@ -981,7 +984,7 @@ static uint32_t osi_slowclk_cal_get(void) {
 }
 
 /* Their levels: 1 error, 2 warning, 3 info, 4 debug, 5 verbose. */
-#define OSI_LOG_LEVEL   3U
+#define OSI_LOG_LEVEL   (ESPW_TRACE ? 5U : 3U)
 
 static void osi_log_writev(unsigned int level, const char *tag,
                            const char *fmt, va_list ap) {
@@ -1027,11 +1030,11 @@ static int32_t osi_event_post(const char *base, int32_t id, void *data,
 
 /* The libraries' power locks: no light sleep while one is held. */
 static void osi_sleep_lock_take(void) {
-    tiku_esp32c61_sleep_hold(1);
+    espw_arch_sleep_hold(1);
 }
 
 static void osi_sleep_lock_give(void) {
-    tiku_esp32c61_sleep_hold(0);
+    espw_arch_sleep_hold(0);
 }
 
 static bool osi_true(void) {
@@ -1384,11 +1387,11 @@ int espw_osi_start(void) {
     osi_timers = NULL;
     osi_timer_wq.waiters = 0U;
 
-    tiku_esp32c61_alarm_disarm(TIKU_ESP32C61_ALARM_DRIVER);
-    tiku_esp32c61_irq_attach(TIKU_ESP32C61_LINE_RADIO,
-                             ESP32C61_SRC_SYSTIMER(TIKU_ESP32C61_ALARM_DRIVER),
-                             TIKU_ESP32C61_LEVEL_TIMER, osi_timer_isr);
-    tiku_esp32c61_irq_enable(TIKU_ESP32C61_LINE_RADIO);
+    espw_arch_irq_attach(ESPW_ARCH_LINE_RADIO,
+                             ESPW_ARCH_SRC_SYSTIMER(ESPW_ARCH_ALARM_DRIVER),
+                             ESPW_ARCH_LEVEL_TIMER, osi_timer_isr);
+    espw_arch_alarm_disarm(ESPW_ARCH_ALARM_DRIVER);
+    espw_arch_irq_enable(ESPW_ARCH_LINE_RADIO);
 
     osi_running = 1U;
     if (osi_task_create((void *)osi_timer_body, "espw-timer",
@@ -1400,16 +1403,16 @@ int espw_osi_start(void) {
 }
 
 int espw_osi_stop(void) {
-    uint32_t m = tiku_esp32c61_mie_off();
+    uint32_t m = espw_arch_mie_off();
     int left = 0;
 
     osi_running = 0U;
     osi_timers = NULL;
-    tiku_esp32c61_alarm_disarm(TIKU_ESP32C61_ALARM_DRIVER);
-    tiku_esp32c61_mie_restore(m);
-    for (unsigned i = 0U; i < TIKU_ESP32C61_LINES_RADIO; i++) {
-        tiku_esp32c61_irq_disable(TIKU_ESP32C61_LINE_RADIO + i);
-        tiku_esp32c61_irq_mark_flash(TIKU_ESP32C61_LINE_RADIO + i, 0);
+    espw_arch_alarm_disarm(ESPW_ARCH_ALARM_DRIVER);
+    espw_arch_mie_restore(m);
+    for (unsigned i = 0U; i < ESPW_ARCH_LINES_RADIO; i++) {
+        espw_arch_irq_disable(ESPW_ARCH_LINE_RADIO + i);
+        espw_arch_irq_mark_flash(ESPW_ARCH_LINE_RADIO + i, 0);
     }
     /* The timer thread sees the flag at its next pass and ends; the stack's
      * own tasks have ended with its deinit.  A second at most for both. */

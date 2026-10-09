@@ -1,5 +1,9 @@
 # ESP32-C61 Wi-Fi and BLE (Espressif radio libraries)
 
+For the C5 PHY and opt-in native Wi-Fi adapter, see
+[`c5/README.md`](c5/README.md). The qualification results below describe C61,
+not C5. The OS adapter is shared; hardware bindings and vendor archives differ.
+
 Wi-Fi and Bluetooth LE for tikuOS on the ESP32-C61 through an OS shim over
 Espressif's binary radio libraries -- the approach NuttX and Zephyr take.
 The design notes, milestones and decisions live in

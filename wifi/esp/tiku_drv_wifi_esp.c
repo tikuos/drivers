@@ -18,8 +18,7 @@
 #include <kernel/process/tiku_process.h>
 #include <kernel/threads/tiku_thread.h>
 #include <kernel/timers/tiku_clock.h>
-#include <arch/esp32c61/tiku_sleep_arch.h>
-#include <arch/esp32c61/tiku_xip_arch.h>
+#include "esp_arch.h"
 #include <tikukits/crypto/pbkdf2/tiku_kits_crypto_pbkdf2.h>
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
@@ -171,7 +170,7 @@ void espw_event(const char *base, int32_t id, const void *data, size_t len) {
 /* Scanning                                                                  */
 /*---------------------------------------------------------------------------*/
 
-/** @brief Every channel the country allows, actively, with default dwell. */
+/** @brief Scan permitted channels; C5 listens passively, C61 uses active probes. */
 static void espw_scan_begin(void) {
     esp_err_t rc;
 
@@ -180,7 +179,13 @@ static void espw_scan_begin(void) {
     }
     espw_scanning = 1U;
     espw_scan_start = tiku_clock_time();
+#if defined(PLATFORM_ESP32C5)
+    const wifi_scan_config_t scan = {.show_hidden = true, .scan_type = 1,
+                                     .scan_time = {.passive = 360}};
+    rc = esp_wifi_scan_start(&scan, false);
+#else
     rc = esp_wifi_scan_start(NULL, false);
+#endif
     if (rc != ESP_OK) {
         espw_scanning = 0U;
         ESPW_PRINTF("scan: 0x%lx\n", (unsigned long)rc);
@@ -557,7 +562,11 @@ static int espw_power_up(void) {
         return TIKU_DRV_ERR_INIT;
     }
     espw_modem_wifi_inited(1);
+#if (ESPW_TRACE + 0)
+    (void)esp_wifi_internal_set_log_level(4);
+#else
     (void)esp_wifi_internal_set_log_level(2);   /* warnings and errors */
+#endif
     rc = espw_wpa_register() == 0 ? ESP_OK : ESP_ERR_NO_MEM;
     if (rc == ESP_OK) {
         rc = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -573,7 +582,7 @@ static int espw_power_up(void) {
     (void)esp_wifi_get_mac(WIFI_IF_STA, espw_mac);
     (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, espw_rx);
     espw_up = 1U;
-    tiku_esp32c61_sleep_hold(1);        /* the modem runs on the PLL */
+    espw_arch_sleep_hold(1);        /* the modem runs on the PLL */
 
     rc = espw_phy_cal_result(&cal_us, &fresh);
     espw_heap_stats(&st);
@@ -606,7 +615,7 @@ static int espw_power_down(void) {
     (void)espw_rx_drain(0);             /* the stack's buffers, back */
     espw_up = 0U;
     espw_scanning = 0U;
-    tiku_esp32c61_sleep_hold(0);
+    espw_arch_sleep_hold(0);
     espw_heap_stats(&st);
     espw_report_ext("down: PSRAM heap");
     espw_teardown(3);
@@ -784,7 +793,7 @@ int tiku_wireless_rx_poll(void) {
 
 static int espw_init(void) {
     (void)espw_roots;
-    if (!tiku_esp32c61_xip_ok()) {
+    if (!espw_arch_xip_ok()) {
         ESPW_PRINTF("xip.bin in flash is not this build's -- make flash "
                     "writes both images\n");
         return TIKU_DRV_ERR_NOT_PRESENT;
