@@ -1,5 +1,5 @@
 # C5 PHY calibration and RF lifecycle, independent of the C61 MAC adapters.
-ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)))),)
+ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE)))),)
 ifneq ($(MCU),esp32c5)
 $(error TIKU_DRV_PHY_C5_ENABLE requires MCU=esp32c5)
 endif
@@ -25,6 +25,17 @@ LDLIBS += -Wl,--start-group $(C5_PHY_DIR)/vendor/libphy.a -lc -lgcc -Wl,--end-gr
 endif
 
 ifeq ($(MCU),esp32c5)
+ifeq ($(TIKU_DRV_SDR_ESP_ENABLE),1)
+ifneq ($(TIKU_ESP32C5_XIP_CODE),1)
+$(error C5 SDR requires TIKU_ESP32C5_XIP_CODE=1)
+endif
+ifeq ($(TIKU_DRV_SDR_ESP_PROBE),1)
+$(error C5 SDR supports receive-only operation; transmit probes are not supported)
+endif
+SRCS += drivers/wifi/esp/esp_sdr.c $(C5_PHY_DIR)/sdr_c5.c
+CFLAGS += -DTIKU_DRV_SDR_ESP_ENABLE=1
+LDFLAGS += -Wl,--defsym=__tiku_c5_sdr=1
+endif
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 ifneq ($(TIKU_THREADS_ENABLE):$(TIKU_ESP32C5_XIP_CODE),1:1)
 $(error C5 radios require TIKU_THREADS_ENABLE=1 TIKU_ESP32C5_XIP_CODE=1)

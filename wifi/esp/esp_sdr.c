@@ -1,11 +1,9 @@
 /*
- * Tiku Drivers - ESP32-C61 radio as a receiver: raw I/Q snapshots
+ * Tiku Drivers - ESP32-C5/C61 raw I/Q capture and spectrum processing
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * The modem's dump unit ("mac-dump" in the HP system's memory-usage
- * register, the one documented part of it) copies the PHY's ADC output into
- * an SRAM bank it is given.  Which registers steer it, and how, is not
- * documented: the sequence here follows what the ESP-SDR project found on
- * this chip, rewritten; a sentinel check tells when it stops holding.
+ * The modem writes ADC samples into a reserved SRAM bank. The C5 hardware
+ * sequence is in c5/sdr_c5.c; the C61 sequence and shared FFT are below.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,23 +12,35 @@
 #include <string.h>
 
 #include <kernel/memory/tiku_mem.h>
+#if defined(PLATFORM_ESP32C5)
+#include "c5/sdr_c5.h"
+#else
 #include <arch/esp32c61/tiku_cpu_freq_boot_arch.h>
 #include <arch/esp32c61/tiku_esp32c61_regs.h>
 #include <arch/esp32c61/tiku_irq_arch.h>
+#endif
 
 #include "esp_abi.h"
 #include "esp_port.h"
 #include "tiku_drv_sdr_esp.h"
 
-/* HP_SYSTEM_SRAM_USAGE_CONF: bits 12..8, one per 64 KB bank, 1 = the dump
- * unit's; bit 16 shifts its writes a bank up.  Readback after each write. */
+/* C61 HP_SYSTEM_SRAM_USAGE_CONF: bits 12..8 select 64 KiB banks;
+ * bit 16 shifts the dump address. C5 uses its separate 128 KiB bank map. */
 #define SRAM_USAGE_CONF     0x60095004UL
 #define SRAM_USAGE_POS      8U
 #define SRAM_USAGE_MSK      (0x1FUL << SRAM_USAGE_POS)
 #define SRAM_DUMP_SHIFT     (1UL << 16)
+#if defined(PLATFORM_ESP32C5)
+#define SRAM_BANK_BYTES     C5_SDR_BANK_BYTES
+#define SRAM_BANK           1U
+#define SRAM_BANK_ADDR      C5_SDR_BANK_BASE
+#define SRAM_DATA_ADDR      C5_SDR_DATA_BASE
+#else
 #define SRAM_BANK_BYTES     0x10000UL
 #define SRAM_BANK           3U              /* the one proven: 0x40830000 */
 #define SRAM_BANK_ADDR      (0x40800000UL + SRAM_BANK * SRAM_BANK_BYTES)
+#define SRAM_DATA_ADDR      SRAM_BANK_ADDR
+#endif
 
 /* The dump unit: a word count and run/trigger/done bits, a source and rate
  * field, a field-packing selector; and the three gates around it. */
@@ -93,7 +103,8 @@ int tiku_drv_sdr_esp_reserve(void) {
     req.allocation_class = TIKU_MEM_TRANSIENT;
     if (tiku_tier_arena_create_opts(&sdr_bank, TIKU_MEM_SRAM, SRAM_BANK_BYTES,
                                     0U, &req) != TIKU_MEM_OK) {
-        TIKU_PRINTF("[esp-sdr] no free 64 KB bank in the SRAM tier\n");
+        TIKU_PRINTF("[esp-sdr] no free %lu KiB capture bank\n",
+                    (unsigned long)(SRAM_BANK_BYTES / 1024));
         return -1;
     }
     if ((uintptr_t)sdr_bank.buf != SRAM_BANK_ADDR) {
@@ -103,20 +114,26 @@ int tiku_drv_sdr_esp_reserve(void) {
         return -1;
     }
     sdr_reserved = 1U;
+    memset((void *)SRAM_DATA_ADDR, 0, 65536U);
     return 0;
 }
 
 void tiku_drv_sdr_esp_release(void) {
     if (sdr_reserved) {
-        (void)tiku_mem_workspace_close(&sdr_bank);
-        sdr_reserved = 0U;
+#if defined(PLATFORM_ESP32C5)
+        if (tiku_sdr_c5_power(0) != 0) { return; }
+#endif
+        if (tiku_mem_workspace_close(&sdr_bank) == TIKU_MEM_OK) {
+            sdr_reserved = 0U;
+        }
     }
 }
 
 const uint32_t *tiku_drv_sdr_esp_samples(void) {
-    return sdr_reserved ? (const uint32_t *)SRAM_BANK_ADDR : NULL;
+    return sdr_reserved ? (const uint32_t *)SRAM_DATA_ADDR : NULL;
 }
 
+#if !defined(PLATFORM_ESP32C5)
 /** @brief Hand the bank to the dump unit (1) or back to the core (0). */
 static void bank_owner(int dump) {
     uint32_t v = TIKU_REG32(SRAM_USAGE_CONF) & ~(SRAM_USAGE_MSK | SRAM_DUMP_SHIFT);
@@ -194,6 +211,8 @@ static int dump_run(uint32_t words, uint8_t rate) {
     return done;
 }
 
+#endif
+
 static int32_t field10(uint32_t w, unsigned pos) {
     return (int32_t)((w >> pos) << 22) >> 22;
 }
@@ -235,7 +254,7 @@ static int32_t tw_cos(unsigned k) {
 
 /** @brief Measure the first @p words of the bank into @p out. */
 static void measure(uint32_t words, tiku_drv_sdr_esp_result_t *out) {
-    const uint32_t *w = (const uint32_t *)SRAM_BANK_ADDR;
+    const uint32_t *w = (const uint32_t *)SRAM_DATA_ADDR;
     int64_t si = 0, sq = 0;
     uint64_t pw = 0;
     uint32_t n = words, peak = 0UL, per = words / 16U;
@@ -312,6 +331,9 @@ static void measure(uint32_t words, tiku_drv_sdr_esp_result_t *out) {
 /** @brief Tune, then run the unit for @p words at rate code @p rate into the
  *         bank at gain index @p gain (-1: the AGC's); @p us its wall time.
  *         @return 0, -2 not done, -3 nothing */
+#if defined(PLATFORM_ESP32C5)
+#define capture_raw tiku_sdr_c5_capture
+#else
 static int capture_raw(uint32_t mhz, uint8_t rate, uint32_t words,
                        uint32_t *us, int gain) {
     volatile uint32_t *bank = (volatile uint32_t *)SRAM_BANK_ADDR;
@@ -354,17 +376,22 @@ static int capture_raw(uint32_t mhz, uint8_t rate, uint32_t words,
     }
     return (same == words || bank[words] != SENTINEL) ? -3 : 0;
 }
+#endif
 
 static int sdr_ready(uint8_t rate) {
+#if defined(PLATFORM_ESP32C5)
+    return sdr_reserved && tiku_sdr_c5_active() && rate < TIKU_DRV_SDR_ESP_RATES;
+#else
     return sdr_reserved && (espw_core_radios() & ESPW_RADIO_WIFI) != 0U &&
            rate < TIKU_DRV_SDR_ESP_RATES;
+#endif
 }
 
 int tiku_drv_sdr_esp_capture(uint32_t mhz, uint8_t rate, uint32_t words,
                              tiku_drv_sdr_esp_result_t *out) {
     int rc;
 
-    if (!sdr_ready(rate) || words == 0U || words > TIKU_DRV_SDR_ESP_WORDS_MAX) {
+    if (!out || !sdr_ready(rate) || words == 0U || words > TIKU_DRV_SDR_ESP_WORDS_MAX) {
         return -1;
     }
     memset(out, 0, sizeof *out);
@@ -391,7 +418,7 @@ int tiku_drv_sdr_esp_held(void) {
 /*---------------------------------------------------------------------------*/
 
 #define SPEC_BLOCKS         32U
-#define SPEC_SCRATCH        (SRAM_BANK_ADDR + SRAM_BANK_BYTES / 2U)
+#define SPEC_SCRATCH        (SRAM_DATA_ADDR + 32768U)
 
 /* A held capture with more than SPEC_RAILED samples at the ADC's rail is
  * splattered across the spectrum: it is taken again SPEC_STEP indices
@@ -403,7 +430,7 @@ int tiku_drv_sdr_esp_held(void) {
 /** @brief Whether more than SPEC_RAILED of the bank's first @p words sit at
  *         the ADC's rail. */
 static int railed(uint32_t words) {
-    const uint32_t *w = (const uint32_t *)SRAM_BANK_ADDR;
+    const uint32_t *w = (const uint32_t *)SRAM_DATA_ADDR;
     uint32_t j, n = 0UL;
 
     for (j = 0U; j < words && n <= SPEC_RAILED; j++) {
@@ -497,12 +524,12 @@ int tiku_drv_sdr_esp_spectrum(uint32_t mhz, uint8_t rate, unsigned nfft,
     int32_t *re = (int32_t *)SPEC_SCRATCH;
     int32_t *im = re + 256;
     uint64_t *acc = (uint64_t *)(im + 256);
-    const uint32_t *w = (const uint32_t *)SRAM_BANK_ADDR;
+    const uint32_t *w = (const uint32_t *)SRAM_DATA_ADDR;
     uint32_t us, words = nfft * SPEC_BLOCKS;
     unsigned b, j, step;
     int rc, held = sdr_hold;
 
-    if (!sdr_ready(rate) || (nfft != 64U && nfft != 128U && nfft != 256U)) {
+    if (!db || !gain || !sdr_ready(rate) || (nfft != 64U && nfft != 128U && nfft != 256U)) {
         return -1;
     }
     for (;;) {

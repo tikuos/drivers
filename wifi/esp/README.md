@@ -1,6 +1,6 @@
 # ESP32-C61 Wi-Fi and BLE (Espressif radio libraries)
 
-For the C5 PHY and opt-in native Wi-Fi and BLE adapters, see
+For the C5 PHY and opt-in native Wi-Fi, BLE and SDR adapters, see
 [`c5/README.md`](c5/README.md). The qualification results below describe C61,
 not C5. The OS adapter is shared; hardware bindings and vendor archives differ.
 

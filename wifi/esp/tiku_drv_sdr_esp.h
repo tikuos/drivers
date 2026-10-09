@@ -1,10 +1,10 @@
 /*
- * Tiku Drivers - ESP32-C61 radio as a receiver: raw I/Q snapshots
+ * Tiku Drivers - ESP32-C5/C61 receive-only I/Q snapshots
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * The PHY's own ADC samples, written by the modem's dump unit into one 64 KB
- * SRAM bank the CPU lends it for the capture; complex baseband around the
- * tuned frequency, 10 bits each way.  Receive only, and the radio must be
- * up (the Wi-Fi driver brings the PHY up) and otherwise quiet.
+ * The modem writes complex baseband samples, 10 bits per component, into
+ * reserved SRAM: 128 KiB on C5, 64 KiB on C61. C5 owns the PHY exclusively;
+ * C61 requires the Wi-Fi PHY to be on and otherwise quiet.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -18,10 +18,7 @@
 #define TIKU_DRV_SDR_ESP_RATES      6U          /* 80 40 20 10 8 4 MS/s */
 #define TIKU_DRV_SDR_ESP_BINS       32U
 
-/* The gain index captures are held at unless told: about a decibel a step,
- * the AGC idling at 76, and 60 the lowest whose noise floor is still the
- * antenna's rather than the ADC's -- as sensitive, 16 dB further from the
- * rail.  Held, the levels hold still while the AGC would chase each burst. */
+/* Default gain-table index. It is not a calibrated gain in decibels. */
 #define TIKU_DRV_SDR_ESP_HOLD       60
 
 /** @brief What one snapshot measured. */
@@ -39,11 +36,11 @@ typedef struct {
                                               slice, low to high */
 } tiku_drv_sdr_esp_result_t;
 
-/** @brief Lend the capture bank from the SRAM tier, before the radio takes
- *         its heap.  @return 0, or -1 (said why) */
+/** @brief Reserve the hardware's capture bank from SRAM before radio startup.
+ *  @return 0 on success, -1 when the required bank is unavailable. */
 int tiku_drv_sdr_esp_reserve(void);
 
-/** @brief Give the bank back. */
+/** @brief Stop the C5 receiver and return its bank; retain it if shutdown fails. */
 void tiku_drv_sdr_esp_release(void);
 
 /** @brief The sample rate rate code @p rate selects, in Hz; 0 if none. */
@@ -54,7 +51,7 @@ uint32_t tiku_drv_sdr_esp_rate_hz(uint8_t rate);
  *        then measure it into @p out.  Interrupts are off meanwhile.
  *
  * @return 0, -1 without the bank or the radio, -2 when the capture did not
- *         complete, -3 when the unit wrote nothing
+ *         complete, -3 for invalid samples or damaged capture guards
  */
 int tiku_drv_sdr_esp_capture(uint32_t mhz, uint8_t rate, uint32_t words,
                              tiku_drv_sdr_esp_result_t *out);
@@ -73,11 +70,11 @@ int tiku_drv_sdr_esp_capture(uint32_t mhz, uint8_t rate, uint32_t words,
 int tiku_drv_sdr_esp_spectrum(uint32_t mhz, uint8_t rate, unsigned nfft,
                               uint8_t *db, uint8_t *gain);
 
-/** @brief Whether the capture bank is lent. */
+/** @brief Whether the driver still owns its capture bank. */
 int tiku_drv_sdr_esp_reserved(void);
 
-/** @brief Hold the receiver's gain at index @p index (0-255) for the
- *         captures that follow, or -1: leave it to the AGC. */
+/** @brief Request gain index @p index (0-255), clamped to the PHY's table,
+ *         for subsequent captures; -1 selects automatic gain. */
 void tiku_drv_sdr_esp_hold(int index);
 
 /** @brief The gain index held, or -1 while the AGC sets it. */
