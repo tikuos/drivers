@@ -125,7 +125,8 @@ make MCU=esp32c5 HAS_DRIVERS=1 HAS_TIKUKITS=0 HAS_TESTS=0 HAS_EXAMPLES=0 \
     ESP_PYTHON=/path/to/venv/bin/python ESPTOOL=/path/to/venv/bin/esptool
 ```
 
-This profile needs the PHY assets, not the Wi-Fi or BLE controller. The
+This profile needs the PHY assets, not the Wi-Fi or BLE controller, and
+enabling either radio with it is a build error. The
 receiver reserves the entire 128 KiB bank at `0x40820000..0x4083ffff` before
 powering the PHY. Samples occupy its upper 64 KiB, starting at `0x40830000`.
 The linker refuses a firmware whose allocator cannot own that whole bank.

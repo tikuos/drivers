@@ -904,7 +904,9 @@ static void osi_timer_body(void *arg) {
             }
         }
         timer_rearm();
-        if (t == NULL) {
+        /* espw_osi_stop() clears the flag and wakes once; testing it here,
+         * inside the atomic section, keeps that wake from going unheard. */
+        if (t == NULL && osi_running) {
             (void)tiku_thread_wait(&osi_timer_wq, 0UL);
         }
         tiku_atomic_exit();

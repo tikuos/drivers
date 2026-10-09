@@ -136,7 +136,10 @@ static int calibrate(uint64_t start)
     uint64_t end;
     (void)tiku_cpu_c5_unique_id(cal.mac, sizeof(cal.mac));
     calibration_result = register_chipv7_phy(&init_data, &cal, 2);
-    if (calibration_result != 0 || tiku_c5_systimer_read(&end) != 0) {
+    /* 1 (ESP_CAL_DATA_CHECK_FAIL) reports the supplied data as stale; the full
+     * calibration still ran, and ESP-IDF's phy_init.c proceeds on it. */
+    if ((calibration_result != 0 && calibration_result != 1) ||
+        tiku_c5_systimer_read(&end) != 0) {
         faulted = 1;
         return TIKU_C5_PHY_FAULT;
     }

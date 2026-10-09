@@ -32,8 +32,13 @@ endif
 ifeq ($(TIKU_DRV_SDR_ESP_PROBE),1)
 $(error C5 SDR supports receive-only operation; transmit probes are not supported)
 endif
+ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
+$(error C5 SDR is a profile of its own; build it without Wi-Fi or BLE)
+endif
 SRCS += drivers/wifi/esp/esp_sdr.c $(C5_PHY_DIR)/sdr_c5.c
-CFLAGS += -DTIKU_DRV_SDR_ESP_ENABLE=1
+# Static SRAM must end below the capture bank at 0x40820000; an 8-command
+# shell history (2 KB of retained SRAM instead of 4 KB) keeps it there.
+CFLAGS += -DTIKU_DRV_SDR_ESP_ENABLE=1 -DTIKU_SHELL_HISTORY_DEPTH=8
 LDFLAGS += -Wl,--defsym=__tiku_c5_sdr=1
 endif
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
