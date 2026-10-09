@@ -114,19 +114,7 @@ int espw_arch_xip_ok(void) { tiku_c5_xip_require(); return 1; }
 
 int espw_c5_random(uint8_t *out, size_t length)
 {
-    uint32_t state, word = 0;
-    size_t i;
-    if (out == NULL && length) { return -1; }
-    if (!tiku_drv_phy_c5_active()) { return tiku_trng_arch_read_bytes(out, length); }
-    state = TIKU_C5_IRQ_SAVE();
-    for (i = 0; i < length; i++) {
-        if (!(i & 3u)) {
-            /* One microsecond exceeds the reference's 16 APB-cycle interval. */
-            tiku_cpu_c5_delay_us(1);
-            word = TIKU_C5_REG_READ(0x600B2828u);
-        }
-        out[i] = (uint8_t)word; word >>= 8;
-    }
-    TIKU_C5_IRQ_RESTORE(state);
-    return 0;
+    /* The platform TRNG reads the RF-fed RNG register while the PHY owns
+     * the analog bus, and the SAR source otherwise. */
+    return tiku_trng_arch_read_bytes(out, length);
 }

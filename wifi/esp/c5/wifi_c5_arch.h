@@ -45,6 +45,6 @@ int espw_arch_xip_ok(void);
 int espw_c5_radio_prepare(void);
 /** @brief Close RF after vendor workers have stopped. */
 void espw_c5_radio_release(void);
-/** @brief RF-fed random words with a minimum inter-word sampling interval. */
+/** @brief Random bytes from the platform TRNG, RF-fed while the PHY is on. */
 int espw_c5_random(uint8_t *out, size_t length);
 #endif

@@ -99,21 +99,19 @@ It does not disable global access filters or replace locked security settings.
 
 TikuBench's `bt` suite accepts `--board esp32c5` in both frontends. Hardware
 checks cover HCI, identity, advertisement commands, actual scan reception,
-VFS state and full SRAM recovery. A C5 central connection to a temporary
-BlueZ peripheral also exchanged GATT reads and advancing uptime notifications
-over the air (`bt --only 27`). Short peer-discovery runs were inconsistent;
-received host RSSI ranged down to -95 dBm. A passing exchange does not
-establish reliable range or sustained throughput.
-Later runs also connected and then received a remote disconnect before GATT
-discovery. BlueZ retained `Connected=yes` while the C5 radio was off and the
-host's HCI connection list was empty. That test environment needs recovery
-before a repeatability claim; do not suppress failed peer tests.
-The host-to-C5 UART test remains a separate qualification: runs fail at
-advertisement discovery or connection. This host logs malformed advertising
-report types; discovery also failed with a pinned SDK reference image. These
-observations do not establish the cause or qualify C5 peripheral operation.
-Pairing/encryption, throughput and Wi-Fi/BLE coexistence are not qualified.
-Enabling Wi-Fi and BLE together is a build error.
+VFS state and full SRAM recovery. The `bt-link` suite runs the C5 against
+the ESP32-C61 both ways round: scan, connect, LE Secure Connections pairing
+on the Security Request, GATT reads and uptime notifications, reconnect from
+the bond, the bond kept across a reboot of both boards, the shell over the
+Nordic UART Service and the beacon; 10 of 10 on 2026-10-09. Until then
+pairing failed with Pairing Failed 0x08 from the C5: the host's entropy
+wrapper was not compiled for this platform, and the C5 TRNG refused to run
+while the PHY owned the analog bus (it now reads the RF-fed RNG register in
+that state). The earlier BlueZ host runs, which dropped the link before GATT
+discovery and logged malformed advertising report types, were that pairing
+failure seen from the host side. Throughput, range and Wi-Fi/BLE
+coexistence are not qualified. Enabling Wi-Fi and BLE together is a build
+error.
 
 ## Receive-only SDR
 
