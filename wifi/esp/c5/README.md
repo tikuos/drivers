@@ -114,10 +114,15 @@ discovery and logged malformed advertising report types, were that pairing
 failure seen from the host side. With the antenna fitted (2026-10-10) the `bt`
 suite passes 145 of 146: the board-initiated connection to a BlueZ peripheral
 completes with GATT reads and notifications, while the shell over the Nordic
-UART Service from the host still fails at the host's scan, which never reports
-the C5's advertisement although the C61 receives it (`bt-link`) and the host
+UART Service from the host fails at the host's scan, which never reports the
+C5's advertisement although an nRF54L15 and the C61 receive it and the host
 sees other advertisers; the host adapter's discovery is the suspect, not the
-radio. Throughput and range are not qualified.
+radio. The same round trip from an nRF54L15 as central passes by hand:
+connect, the C5's Security Request answered with LE Secure Connections pairing
+(the nRF's stack makes the P-256 keys itself), the bond stored, the link
+encrypted, then subscribe, `info` written with its carriage return and the
+answer back in notifications; the C5 needs tikukits 85e04cc for its pairing
+entropy. Throughput and range are not qualified.
 
 ## Coexistence
 
