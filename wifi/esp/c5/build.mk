@@ -1,5 +1,5 @@
 # C5 PHY calibration and RF lifecycle, independent of the C61 MAC adapters.
-ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE)))),)
+ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE) $(TIKU_DRV_154_C5_ENABLE)))),)
 ifneq ($(MCU),esp32c5)
 $(error TIKU_DRV_PHY_C5_ENABLE requires MCU=esp32c5)
 endif
@@ -40,6 +40,26 @@ SRCS += drivers/wifi/esp/esp_sdr.c $(C5_PHY_DIR)/sdr_c5.c
 # shell history (2 KB of retained SRAM instead of 4 KB) keeps it there.
 CFLAGS += -DTIKU_DRV_SDR_ESP_ENABLE=1 -DTIKU_SHELL_HISTORY_DEPTH=8
 LDFLAGS += -Wl,--defsym=__tiku_c5_sdr=1
+endif
+# IEEE 802.15.4: the PHY under the MAC in interfaces/radio/ and the radio154
+# shell command.  It takes the PHY alone and needs the BLE download for the
+# baseband (libbtbb.a) and the crypto kit's AES for link security.
+ifeq ($(TIKU_DRV_154_C5_ENABLE),1)
+ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE)),)
+$(error C5 802.15.4 is a profile of its own; build it without Wi-Fi, BLE or the SDR)
+endif
+C5_154_HASH_OK := $(shell cd $(C5_PHY_DIR) && \
+    { if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS-ble; \
+      else shasum -a 256 -c SHA256SUMS-ble; fi; } >/dev/null 2>&1 && echo yes)
+ifneq ($(C5_154_HASH_OK),yes)
+$(error C5 802.15.4 needs the BLE baseband: run sh $(C5_PHY_DIR)/fetch.sh --ble)
+endif
+SRCS += $(C5_PHY_DIR)/ieee154_c5.c interfaces/radio/tiku_154_frame.c \
+    interfaces/radio/tiku_154.c tikukits/crypto/ccm/tiku_kits_crypto_ccm.c \
+    tikukits/crypto/aes128/tiku_kits_crypto_aes128.c
+CFLAGS += -DTIKU_DRV_154_C5_ENABLE=1 -DTIKU_HAS_154=1
+TIKU_CAP_154 := 1
+LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libbtbb.a libphy.a) -lc -lgcc -Wl,--end-group
 endif
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 ifneq ($(TIKU_THREADS_ENABLE):$(TIKU_ESP32C5_XIP_CODE),1:1)

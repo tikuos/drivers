@@ -5,7 +5,7 @@ warm wake, and RF shutdown. An optional Wi-Fi build uses C5 vendor libraries
 with the shared TikuOS OS adapter and C5 interrupt, clock and timer bindings.
 There is no ESP-IDF or FreeRTOS runtime dependency. Separate opt-in profiles
 provide BLE, both radios at once under Espressif's coexistence arbiter, and
-receive-only SDR. IEEE 802.15.4 is not provided.
+receive-only SDR, and IEEE 802.15.4.
 
 ## Build
 
@@ -228,6 +228,53 @@ PYTHONPATH=TikuBench python -m tikubench run sdr --board esp32c5 \
 
 Use `bt` instead of `sdr` for the separately installed BLE profile. Neither
 suite silently powers down a radio already owned by another user.
+
+## IEEE 802.15.4
+
+```sh
+sh drivers/wifi/esp/c5/fetch.sh --ble
+make MCU=esp32c5 HAS_DRIVERS=1 HAS_TIKUKITS=1 HAS_TESTS=0 HAS_EXAMPLES=0 \
+    TIKU_SHELL_ENABLE=1 TIKU_ESP32C5_XIP_CODE=1 TIKU_DRV_154_C5_ENABLE=1 \
+    EXTRA_CFLAGS=-DTIKU_SHELL_CMD_RADIO154=1 BUILD_DIR=build/esp32c5-154 \
+    TOOLCHAIN_DIR=/path/to/riscv-toolchain TOOLCHAIN_PREFIX=riscv-none-elf- \
+    ESP_PYTHON=/path/to/venv/bin/python ESPTOOL=/path/to/venv/bin/esptool
+```
+
+`ieee154_c5.c` implements `hal/tiku_ieee154_hal.h` under the MAC in
+`interfaces/radio/` and the `radio154` command, from the C5's 15.4 MAC block's
+registers (ESP-IDF's open `ieee802154` driver is the reference; no vendor 15.4
+library is used).  The profile takes the PHY alone: building it with Wi-Fi,
+BLE or the SDR is a build error.  It needs `libbtbb.a` from the BLE download
+for the baseband shared with BLE, the MAC's ramp delays and the TX power
+table.  Taking the radio turns the PHY on, opens the 15.4 clock domain (the
+15.4 MAC and APB, ETM, modem-security APB, BT APB and baseband clocks and the
+15.4 gate map), resets the MAC, turns arbitration off and sets CCA by energy
+at -75 dBm and 0 dBm transmit power; leaving closes the PHY and then restores
+those fields.  Events are polled.
+
+Energy detection measures for 1 ms (64 symbols, the maximum over the window)
+and reports the level on the nRF54L's scale, dBm + 94; CCA measures 8 symbols.
+`rx` receives promiscuously without ACKs into a DMA buffer the MAC fills as
+[PHR][frame][RSSI][LQI]; a bad FCS ends the listen as abort reason 3.
+`rx_ack` filters on interface 0's PAN and short address and lets the MAC block
+send the ACK; the MAC layer above waits for ACKs to its own frames through
+`rx`.  Link security uses the software AES-CCM* in `tikukits/crypto/ccm/`.
+
+Two timings come from the board, not from ESP-IDF.  After sending an ACK the
+MAC turns back to receive, and a stop inside that turnaround makes its next
+ACK time out (abort reason 16); the driver waits 300 us after each ACK.  And
+after a stop the RF chain needs a few microseconds to wind down: closing the
+PHY inside that window left every later bring-up unable to measure or receive
+until the chip was reset (no pause failed from the third bring-up on, 5 us
+never did); `leave` waits 50 us.  Both failures depended on code layout,
+because a flash-cache miss in the path supplied the missing time.
+
+Against an nRF54L15 at about 20 cm (2026-10-10): its pings on channel 20 read
+-41 dBm on channel 20 and the floor on channel 21; five frames each way
+arrived intact on channels 11, 15 and 26 (C5 at -44 to -53 dBm, nRF at -56 to
+-61 dBm) and none on channel 16 while it sent on 15; and TikuBench's
+`radio154` suite with the C5 as DUT passes 6 of 6 on channel 15: 200/200
+unicasts ACKed each way and 150/150 secured frames verified each way.
 
 ## Calls and ownership
 
