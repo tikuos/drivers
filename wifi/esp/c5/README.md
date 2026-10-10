@@ -67,6 +67,8 @@ of both bands finishes in 15 s with 154 APs, and 31 s with 208 to 215 APs
 while BLE scans or advertises beside it; an open join lands on a 5 GHz
 channel in 12 s and holds while BLE scans. The C5 profile carries no IP kit,
 so association is as far as the shell goes on this chip.
+These figures are with an antenna on the WROOM-1U's U.FL connector; without
+one the same both-band scan returned a single AP or none.
 
 ## BLE
 
@@ -109,7 +111,13 @@ wrapper was not compiled for this platform, and the C5 TRNG refused to run
 while the PHY owned the analog bus (it now reads the RF-fed RNG register in
 that state). The earlier BlueZ host runs, which dropped the link before GATT
 discovery and logged malformed advertising report types, were that pairing
-failure seen from the host side. Throughput and range are not qualified.
+failure seen from the host side. With the antenna fitted (2026-10-10) the `bt`
+suite passes 145 of 146: the board-initiated connection to a BlueZ peripheral
+completes with GATT reads and notifications, while the shell over the Nordic
+UART Service from the host still fails at the host's scan, which never reports
+the C5's advertisement although the C61 receives it (`bt-link`) and the host
+sees other advertisers; the host adapter's discovery is the suspect, not the
+radio. Throughput and range are not qualified.
 
 ## Coexistence
 
