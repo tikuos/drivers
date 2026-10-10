@@ -84,7 +84,8 @@ typedef enum {
 } esp_wifi_regulatory_type_t;
 
 /*
- * regdomain_table: ISO alpha-2 country codes and their regulatory profile indices.
+ * regdomain_table: ISO alpha-2 country codes and their regulatory profile
+ * indices.
  * Last row is a sentinel (not a real country code).
  */
 const wifi_regdomain_t regdomain_table[] = {
@@ -271,7 +272,8 @@ const wifi_regdomain_t regdomain_table[] = {
     {{'Y', 'T'}, ESP_WIFI_REGULATORY_TYPE_AF},
     {{'Z', 'A'}, ESP_WIFI_REGULATORY_TYPE_ZA},
     {{'Z', 'W'}, ESP_WIFI_REGULATORY_TYPE_AF},
-    {{'#', '#'}, ESP_WIFI_REGULATORY_TYPE_MAX}, /* Sentinel: end of table; not a real country code — do not use as wifi_country_t.cc. */
+    /* Sentinel: end of table; not a real country code. */
+    {{'#', '#'}, ESP_WIFI_REGULATORY_TYPE_MAX},
 };
 
 const wifi_regulatory_t regulatory_data[] = {

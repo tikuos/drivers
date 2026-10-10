@@ -8,7 +8,9 @@
 #define TIKU_DRV_PHY_C5_ABI_H_
 #include <stdint.h>
 
-typedef struct { uint8_t params[256]; } c5_phy_init_t;
+typedef struct {
+    uint8_t params[256];
+} c5_phy_init_t;
 typedef struct {
     uint8_t version[4];
     uint8_t mac[6];
@@ -19,7 +21,8 @@ _Static_assert(sizeof(c5_phy_init_t) == 256, "C5 PHY initialization ABI");
 _Static_assert(sizeof(c5_phy_calibration_t) == 1904, "C5 PHY calibration ABI");
 
 /** @brief Calibrate the C5 PHY; mode 2 requests a full calibration. */
-int register_chipv7_phy(const c5_phy_init_t *init, c5_phy_calibration_t *cal, int mode);
+int register_chipv7_phy(const c5_phy_init_t *init, c5_phy_calibration_t *cal,
+                        int mode);
 /** @brief Restore the PHY's retained RF calibration. */
 void phy_wakeup_init(void);
 /** @brief Close RF activity before removing its digital clocks. */

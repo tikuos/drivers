@@ -9,17 +9,21 @@
 #define TIKU_DRV_PHY_C5_H_
 #include <stdint.h>
 
-#define TIKU_C5_PHY_OK       0
-#define TIKU_C5_PHY_BUSY    -1
-#define TIKU_C5_PHY_CLOCK   -2
-#define TIKU_C5_PHY_FAULT   -3
+#define TIKU_C5_PHY_OK    0
+#define TIKU_C5_PHY_BUSY  -1
+#define TIKU_C5_PHY_CLOCK -2
+#define TIKU_C5_PHY_FAULT -3
 
-/** @brief Start the PHY, calibrating once per boot; return zero or a negative error.
- * @note Kernel foreground with interrupts enabled. A calibration failure requires reboot.
+/** @brief Start the PHY, calibrating once per boot; return zero or a negative
+ * error.
+ * @note Kernel foreground with interrupts enabled. A calibration failure
+ * requires reboot.
  */
 int tiku_drv_phy_c5_on(void);
-/** @brief Close RF and restore the saved digital clock fields; repeated off is harmless.
- * @note Kernel foreground with interrupts enabled. Fault state retains analog ownership.
+/** @brief Close RF and restore the saved digital clock fields; repeated off is
+ * harmless.
+ * @note Kernel foreground with interrupts enabled. Fault state retains analog
+ * ownership.
  */
 int tiku_drv_phy_c5_off(void);
 /** @brief Return nonzero only after successful calibration or wake. */
