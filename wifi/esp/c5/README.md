@@ -243,14 +243,14 @@ make MCU=esp32c5 HAS_DRIVERS=1 HAS_TIKUKITS=1 HAS_TESTS=0 HAS_EXAMPLES=0 \
 `ieee154_c5.c` implements `hal/tiku_ieee154_hal.h` under the MAC in
 `interfaces/radio/` and the `radio154` command, from the C5's 15.4 MAC block's
 registers (ESP-IDF's open `ieee802154` driver is the reference; no vendor 15.4
-library is used).  The profile takes the PHY alone: building it with Wi-Fi,
-BLE or the SDR is a build error.  It needs `libbtbb.a` from the BLE download
-for the baseband shared with BLE, the MAC's ramp delays and the TX power
-table.  Taking the radio turns the PHY on, opens the 15.4 clock domain (the
-15.4 MAC and APB, ETM, modem-security APB, BT APB and baseband clocks and the
-15.4 gate map), resets the MAC, turns arbitration off and sets CCA by energy
-at -75 dBm and 0 dBm transmit power; leaving closes the PHY and then restores
-those fields.  Events are polled.
+library is used).  The profile takes the PHY alone or shares it with BLE
+(below); building it with Wi-Fi or the SDR is a build error.  It needs
+`libbtbb.a` from the BLE download for the baseband shared with BLE, the MAC's
+ramp delays and the TX power table.  Taking the radio turns the PHY on, opens
+the 15.4 clock domain (the 15.4 MAC and APB, ETM, modem-security APB, BT APB
+and baseband clocks and the 15.4 gate map), resets the MAC, turns arbitration
+off and sets CCA by energy at -75 dBm and 0 dBm transmit power; leaving closes
+the PHY and then restores those fields.  Events are polled.
 
 Energy detection measures for 1 ms (64 symbols, the maximum over the window)
 and reports the level on the nRF54L's scale, dBm + 94; CCA measures 8 symbols.
@@ -268,6 +268,23 @@ PHY inside that window left every later bring-up unable to measure or receive
 until the chip was reset (no pause failed from the third bring-up on, 5 us
 never did); `leave` waits 50 us.  Both failures depended on code layout,
 because a flash-cache miss in the path supplied the missing time.
+
+### Beside BLE
+
+With `TIKU_DRV_BLE_ESP_ENABLE=1` as well (`TIKU_THREADS_ENABLE=1
+TIKU_ESP32C5_XIP_CODE=1`, and `fetch.sh --coex` for the arbiter), the 15.4
+MAC is a third radio of the adapter: `radio154` brings the core up like `bt
+on` does (the shared heap, the modem, the timer service, the arbiter), takes
+the PHY and the baseband through the adapter's counts, and opens its clock
+domain in `wifi_c5_phy.c`'s holder model, where a bit both MACs need (ETM,
+the security APB, the BT APB, the baseband) stays on while either holds it.
+The arbiter's hooks in `libcoexist.a` (`esp_coex_ieee802154_*`) set the MAC's
+priority fields: ACKs at middle priority, frames at low while the MAC sends
+or receives and idle between, as ESP-IDF's defaults have them; a transmit the
+arbiter breaks (TX_STATUS reason 18) is reported to it and retried by the MAC
+layer above, as any unacknowledged frame.  The order of `bt on` and
+`radio154` does not matter, and either may go down first.  The radio154
+suite's `radio154coex` variant runs the whole suite with BLE advertising.
 
 Against an nRF54L15 at about 20 cm (2026-10-10): its pings on channel 20 read
 -41 dBm on channel 20 and the floor on channel 21; five frames each way

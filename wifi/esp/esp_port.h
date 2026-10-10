@@ -28,10 +28,13 @@
 /* The radios, as the core counts them. */
 #define ESPW_RADIO_WIFI     (1U << 0)
 #define ESPW_RADIO_BLE      (1U << 1)
+#define ESPW_RADIO_154      (1U << 2)
 
-/* Both radios built: they may run at once, under the coexistence arbiter. */
-#define ESPW_COEX   ((TIKU_DRV_WIFI_ESP_ENABLE + 0) && \
-                     (TIKU_DRV_BLE_ESP_ENABLE + 0))
+/* BLE built with Wi-Fi or with the C5's 15.4 MAC: they may run at once,
+ * under the coexistence arbiter. */
+#define ESPW_COEX   ((TIKU_DRV_BLE_ESP_ENABLE + 0) && \
+                     ((TIKU_DRV_WIFI_ESP_ENABLE + 0) || \
+                      (TIKU_DRV_154_C5_ENABLE + 0)))
 
 /**
  * @brief What a radio stands on, brought up with the first: the libraries'
@@ -124,6 +127,10 @@ void espw_modem_bt_off(void);
 /** @brief The BLE timer's sleep clock, in Hz. */
 uint32_t espw_modem_bt_lp_hz(void);
 
+/** @brief The 15.4 MAC's clocks and gate map on, or off (ESP32-C5). */
+void espw_modem_154_on(void);
+void espw_modem_154_off(void);
+
 /** @brief The PHY on for Wi-Fi (calibrating it the first time) or off; it
  *         powers down after the last radio's off. */
 void espw_phy_enable(void);
@@ -132,6 +139,15 @@ void espw_phy_disable(void);
 /** @brief The same for BLE. */
 void espw_phy_bt_enable(void);
 void espw_phy_bt_disable(void);
+
+/** @brief The same for the 15.4 MAC (ESP32-C5). */
+void espw_phy_154_enable(void);
+void espw_phy_154_disable(void);
+
+/** @brief The baseband BLE and 15.4 share, initialised by its first user
+ *         and left as it is by the rest. */
+void espw_btbb_enable(void);
+void espw_btbb_disable(void);
 
 /** @brief The last calibration: its result and how long it took, and
  *         whether it ran since the last ask (a restart wakes the PHY). */

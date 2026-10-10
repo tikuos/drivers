@@ -42,11 +42,12 @@ CFLAGS += -DTIKU_DRV_SDR_ESP_ENABLE=1 -DTIKU_SHELL_HISTORY_DEPTH=8
 LDFLAGS += -Wl,--defsym=__tiku_c5_sdr=1
 endif
 # IEEE 802.15.4: the PHY under the MAC in interfaces/radio/ and the radio154
-# shell command.  It takes the PHY alone and needs the BLE download for the
-# baseband (libbtbb.a) and the crypto kit's AES for link security.
+# shell command.  It takes the PHY alone or shares it with BLE, and needs the
+# BLE download for the baseband (libbtbb.a) and the crypto kit's AES for
+# link security.
 ifeq ($(TIKU_DRV_154_C5_ENABLE),1)
-ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE)),)
-$(error C5 802.15.4 is a profile of its own; build it without Wi-Fi, BLE or the SDR)
+ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE)),)
+$(error C5 802.15.4 runs alone or beside BLE; build it without Wi-Fi or the SDR)
 endif
 C5_154_HASH_OK := $(shell cd $(C5_PHY_DIR) && \
     { if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS-ble; \
@@ -59,6 +60,11 @@ SRCS += $(C5_PHY_DIR)/ieee154_c5.c interfaces/radio/tiku_154_frame.c \
     tikukits/crypto/aes128/tiku_kits_crypto_aes128.c
 CFLAGS += -DTIKU_DRV_154_C5_ENABLE=1 -DTIKU_HAS_154=1
 TIKU_CAP_154 := 1
+# Beside BLE the MAC is a third radio of the adapter: the shared PHY and
+# baseband, and the arbiter's priorities for its frames.
+ifeq ($(TIKU_DRV_BLE_ESP_ENABLE),1)
+CFLAGS += -DTIKU_C5_154_COEX=1
+endif
 LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libbtbb.a libphy.a) -lc -lgcc -Wl,--end-group
 endif
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
@@ -98,9 +104,9 @@ SRCS += tikukits/crypto/p256/tiku_kits_crypto_p256.c
 CFLAGS += -DTIKU_DRV_BLE_ESP_ENABLE=1
 LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libble_app.a libbtbb.a libphy.a) -lm -lc -lgcc -Wl,--end-group
 endif
-# Both radios: the coexistence arbiter between them, most of it in ROM
-# (esp32c5.rom.coexist.ld, linked with Wi-Fi above), the rest in libcoexist.a.
-ifeq ($(TIKU_DRV_WIFI_ESP_ENABLE):$(TIKU_DRV_BLE_ESP_ENABLE),1:1)
+# BLE with Wi-Fi or with 15.4: the coexistence arbiter between them, most
+# of it in ROM (esp32c5.rom.coexist.ld), the rest in libcoexist.a.
+ifneq ($(and $(filter 1,$(TIKU_DRV_BLE_ESP_ENABLE)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_154_C5_ENABLE))),)
 C5_COEX_HASH_OK := $(shell cd $(C5_PHY_DIR) && \
     { if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS-coex; \
       else shasum -a 256 -c SHA256SUMS-coex; fi; } >/dev/null 2>&1 && echo yes)
@@ -108,6 +114,9 @@ ifneq ($(C5_COEX_HASH_OK),yes)
 $(error C5 coexistence asset missing or invalid: run sh $(C5_PHY_DIR)/fetch.sh --coex)
 endif
 SRCS += drivers/wifi/esp/esp_coex.c
+ifneq ($(TIKU_DRV_WIFI_ESP_ENABLE),1)
+LDFLAGS += -T$(C5_PHY_DIR)/vendor/esp32c5.rom.coexist.ld
+endif
 LDLIBS += -Wl,--start-group $(C5_PHY_DIR)/vendor/libcoexist.a -lc -lgcc -Wl,--end-group
 endif
 endif

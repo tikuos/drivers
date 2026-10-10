@@ -7,6 +7,9 @@
 #include "wifi_c5_arch.h"
 #include "tiku_drv_phy_c5.h"
 #include "../esp_port.h"
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+#include "../esp_ble_abi.h"
+#endif
 #include <arch/esp32c5/tiku_cpu_common.h>
 #include <arch/esp32c5/tiku_timer_arch.h>
 #include <arch/esp32c5/tiku_esp32c5_regs.h>
@@ -14,6 +17,9 @@
 static uint32_t saved_lp, saved_lp_clock, saved_lp_map, saved_rng;
 static uint32_t track_timer[5];
 static uint8_t prepared, inited, phy_used;
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+static uint8_t btbb_users;              /* the baseband's users, both MACs */
+#endif
 static unsigned reported_calibrations;
 static void *phy_lock;
 
@@ -30,7 +36,7 @@ static void track(void *argument)
     (void)argument;
     (void)espw_osi_funcs._mutex_lock(phy_lock);
     if (prepared && phy_used) {
-        phy_param_track_tot((phy_used & 1u) != 0, (phy_used & 2u) != 0);
+        phy_param_track_tot((phy_used & 1u) != 0, (phy_used & 6u) != 0);
     }
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
@@ -59,6 +65,9 @@ void espw_c5_radio_release(void)
         return;
     }
     phy_used = 0;
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+    btbb_users = 0;
+#endif
     field(0x600AF018u, 3u, saved_lp);
     field(0x600AF00Cu, 0xffffu, saved_lp_clock);
     field(0x600AF020u, 0x00660000u, saved_lp_map);
@@ -115,7 +124,7 @@ void espw_phy_enable(void)
     }
     (void)espw_osi_funcs._mutex_lock(phy_lock);
     phy_used |= 1u;
-    phy_param_track_tot(1, (phy_used & 2u) != 0);
+    phy_param_track_tot(1, (phy_used & 6u) != 0);
     phy_wifi_enable_set(1);
     /* Reference MAC configuration disables the baseband's RX idle watchdog. */
     set_bb_wdg(true, false, 0x18, 0xaa, false, false, false);
@@ -155,11 +164,45 @@ int espw_read_mac(uint8_t *mac, unsigned type)
 }
 
 #if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+/* MODEM_SYSCON CLK_CONF: ETM (22), the 15.4 APB (23) and MAC (24), the
+ * modem security blocks and their APB (25..29), the BLE timer (30);
+ * CLK_CONF1: the BT APB (16), the baseband (17), the BLE MAC (18).  BLE and
+ * 15.4 share ETM, the security APB, the BT APB and the baseband; a shared
+ * bit stays on while either MAC holds it.  The 15.4 clock domain's gate map
+ * (CLK_CONF_POWER_ST bits 11:8) opens in the active ICG code, 2. */
 #define BT_SYS_CLOCKS 0x7e400000u
 #define BT_MAC_CLOCKS 0x00070000u
+#define ZB_SYS_CLOCKS ((1u << 22) | (1u << 23) | (1u << 24) | (1u << 28))
+#define ZB_MAC_CLOCKS ((1u << 16) | (1u << 17))
+#define ZB_MAP_MASK   (0xFu << 8)
+#define ZB_MAP        (1u << 10)
 #define BT_RESET      0x6e018000u
-static uint32_t bt_sys, bt_mac, bt_lp, bt_enable;
-static uint8_t bt_clocked;
+static uint32_t held_sys, held_mac, held_map, bt_lp, bt_enable;
+static uint8_t bt_clocked, zb_clocked;
+
+/* The clock and map fields as the MACs hold them: a bit of a MAC that is up
+ * is on, every other bit is what the registers held before the first MAC
+ * came up.  Interrupts are masked by the caller. */
+static void modem_apply(void)
+{
+    uint32_t sys = (bt_clocked ? BT_SYS_CLOCKS : 0u) |
+                   (zb_clocked ? ZB_SYS_CLOCKS : 0u);
+    uint32_t mac = (bt_clocked ? BT_MAC_CLOCKS : 0u) |
+                   (zb_clocked ? ZB_MAC_CLOCKS : 0u);
+    field(0x600A9C04u, BT_SYS_CLOCKS | ZB_SYS_CLOCKS, held_sys | sys);
+    field(0x600A9C14u, BT_MAC_CLOCKS | ZB_MAC_CLOCKS, held_mac | mac);
+    field(0x600A9C0Cu, ZB_MAP_MASK, zb_clocked ? ZB_MAP : held_map);
+}
+
+/** @brief Record the fields before the first MAC's clocks open. */
+static void modem_hold(void)
+{
+    if (!bt_clocked && !zb_clocked) {
+        held_sys = TIKU_C5_REG_READ(0x600A9C04u) & ~(BT_SYS_CLOCKS | ZB_SYS_CLOCKS);
+        held_mac = TIKU_C5_REG_READ(0x600A9C14u) & ~(BT_MAC_CLOCKS | ZB_MAC_CLOCKS);
+        held_map = TIKU_C5_REG_READ(0x600A9C0Cu) & ZB_MAP_MASK;
+    }
+}
 
 void espw_modem_bt_on(void)
 {
@@ -172,54 +215,119 @@ void espw_modem_bt_on(void)
         tiku_c5_fatal("BLE crystal unsupported");
     }
     state = TIKU_C5_IRQ_SAVE();
-    bt_sys = TIKU_C5_REG_READ(0x600A9C04u);
-    bt_mac = TIKU_C5_REG_READ(0x600A9C14u);
+    modem_hold();
     bt_lp = TIKU_C5_REG_READ(0x600AF004u);
     bt_enable = TIKU_C5_REG_READ(0x600AF018u);
-    field(0x600A9C04u, BT_SYS_CLOCKS, BT_SYS_CLOCKS);
-    field(0x600A9C14u, BT_MAC_CLOCKS, BT_MAC_CLOCKS);
+    bt_clocked = 1;
+    modem_apply();
     field(0x600A9C10u, BT_RESET, BT_RESET);
     field(0x600A9C10u, BT_RESET, 0);
     field(0x600AF004u, 0xffffu, ((xtal * 10u - 1u) << 4) | 4u);
     field(0x600AF018u, 8u, 8u);
-    bt_clocked = 1;
     TIKU_C5_IRQ_RESTORE(state);
 }
+
 void espw_modem_bt_off(void)
 {
     uint32_t state = TIKU_C5_IRQ_SAVE();
     if (bt_clocked) {
         field(0x600AF004u, 0xffffu, bt_lp);
         field(0x600AF018u, 8u, bt_enable);
-        field(0x600A9C14u, BT_MAC_CLOCKS, bt_mac);
-        field(0x600A9C04u, BT_SYS_CLOCKS, bt_sys);
         bt_clocked = 0;
+        modem_apply();
     }
     TIKU_C5_IRQ_RESTORE(state);
 }
+
 uint32_t espw_modem_bt_lp_hz(void)
 {
     return 100000u;
 }
-void espw_phy_bt_enable(void)
+
+void espw_modem_154_on(void)
 {
-    if (!prepared || !bt_clocked) {
-        tiku_c5_fatal("BLE PHY without clocks");
+    uint32_t state = TIKU_C5_IRQ_SAVE();
+    if (!zb_clocked) {
+        modem_hold();
+        zb_clocked = 1;
+        modem_apply();
     }
+    TIKU_C5_IRQ_RESTORE(state);
+}
+
+void espw_modem_154_off(void)
+{
+    uint32_t state = TIKU_C5_IRQ_SAVE();
+    if (zb_clocked) {
+        zb_clocked = 0;
+        modem_apply();
+    }
+    TIKU_C5_IRQ_RESTORE(state);
+}
+
+/* The PHY in use by one of the 2.4 GHz MACs (bit 2 BLE, 4 15.4): the
+ * tracker follows both, and runs while any user remains. */
+static void phy_mac_enable(uint8_t bit)
+{
     (void)espw_osi_funcs._mutex_lock(phy_lock);
-    phy_used |= 2u;
+    phy_used |= bit;
     phy_param_track_tot((phy_used & 1u) != 0, 1);
     espw_timer_setfn(track_timer, (void *)track, NULL);
     espw_timer_arm_us(track_timer, 1000000u, true);
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
-void espw_phy_bt_disable(void)
+
+static void phy_mac_disable(uint8_t bit)
 {
     (void)espw_osi_funcs._mutex_lock(phy_lock);
-    phy_used &= (uint8_t)~2u;
+    phy_used &= (uint8_t)~bit;
     if (!phy_used) {
         espw_timer_disarm(track_timer);
     }
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
+
+void espw_phy_bt_enable(void)
+{
+    if (!prepared || !bt_clocked) {
+        tiku_c5_fatal("BLE PHY without clocks");
+    }
+    phy_mac_enable(2u);
+}
+
+void espw_phy_bt_disable(void)
+{
+    phy_mac_disable(2u);
+}
+
+void espw_phy_154_enable(void)
+{
+    if (!prepared || !zb_clocked) {
+        tiku_c5_fatal("15.4 PHY without clocks");
+    }
+    phy_mac_enable(4u);
+}
+
+void espw_phy_154_disable(void)
+{
+    phy_mac_disable(4u);
+}
+
+/* The baseband serves BLE and 15.4 and is initialised once for both; the
+ * library has no shutdown, so the count only keeps a second user from
+ * initialising it under the first.  The PHY's release zeroes the count. */
+void espw_btbb_enable(void)
+{
+    if (!btbb_users++) {
+        bt_bb_v2_init_cmplx(1u);
+    }
+}
+
+void espw_btbb_disable(void)
+{
+    if (btbb_users) {
+        btbb_users--;
+    }
+}
 #endif
+

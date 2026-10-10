@@ -40,7 +40,8 @@ static tiku_arena_t core_ext_arena;
 #endif
 
 static const char *core_name(uint8_t radio) {
-    return radio == ESPW_RADIO_BLE ? "BLE" : "Wi-Fi";
+    return radio == ESPW_RADIO_BLE ? "BLE" :
+           radio == ESPW_RADIO_154 ? "15.4" : "Wi-Fi";
 }
 
 /** @brief Packet buffers' block from the PSRAM tier, bringing PSRAM up if

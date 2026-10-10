@@ -20,6 +20,9 @@
 
 #include "esp_heap.h"
 #include "esp_port.h"
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+#include "esp_ble_abi.h"
+#endif
 
 /* MODEM_SYSCON: the modem's digital clocks, resets and clock-gate maps. */
 #define SYSCON_BASE         0x600A9C00UL
@@ -365,6 +368,20 @@ void espw_phy_bt_disable(void) {
     phy_modem_off(PHY_BT);
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+/* The baseband has one user on the C61, BLE; the count matches the C5's. */
+static uint8_t btbb_users;
+void espw_btbb_enable(void) {
+    if (!btbb_users++) {
+        bt_bb_v2_init_cmplx(1U);
+    }
+}
+void espw_btbb_disable(void) {
+    if (btbb_users) {
+        btbb_users--;
+    }
+}
+#endif
 
 int espw_phy_cal_result(uint32_t *us, int *fresh) {
     if (us != NULL) {

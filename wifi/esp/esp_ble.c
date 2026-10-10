@@ -622,6 +622,7 @@ static void espb_teardown(int stage) {
 #if ESPW_COEX
         coex_disable();
 #endif
+        espw_btbb_disable();
         espw_phy_bt_disable();
         espw_arch_sleep_hold(0);
     }
@@ -732,7 +733,7 @@ static int espb_power_up(void) {
     /* Enable: the PHY for BLE, the baseband, the flash-only timing. */
     espw_phy_bt_enable();
     espw_arch_sleep_hold(1);
-    bt_bb_v2_init_cmplx(1U);
+    espw_btbb_enable();
 #if ESPW_COEX
     (void)coex_enable();
 #endif
