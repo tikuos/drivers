@@ -4,8 +4,8 @@ This component controls the C5 radio's physical layer: initial calibration,
 warm wake, and RF shutdown. An optional Wi-Fi build uses C5 vendor libraries
 with the shared TikuOS OS adapter and C5 interrupt, clock and timer bindings.
 There is no ESP-IDF or FreeRTOS runtime dependency. Separate opt-in profiles
-provide BLE and receive-only SDR. IEEE 802.15.4 and simultaneous-radio
-coexistence are not provided.
+provide BLE, both radios at once under Espressif's coexistence arbiter, and
+receive-only SDR. IEEE 802.15.4 is not provided.
 
 ## Build
 
@@ -42,9 +42,12 @@ The Wi-Fi archives are pinned to `esp32-wifi-lib`
 revision, including both bands. C5 AP records are 96 bytes, not the C61's 92.
 Install the boot/XIP pair with `tools/esp32c5_flash.py`. Radio power stays off
 until `wifi on`; `wifi scan` uses passive listening and `wifi off` stops workers
-before returning the reserved heap. The default heap is 48 KiB of internal
-SRAM. A second physical interrupt line supports MAC and power sources that the
-vendor library routes to the same logical interrupt.
+before returning the reserved heap. The default heap is 64 KiB of internal
+SRAM: a passive scan of both bands keeps a 96-byte record per AP heard, and
+48 KiB ran out at 154 APs, losing the table; 64 KiB peaked at 60 KiB with
+232 APs, nothing refused. A second physical interrupt
+line supports MAC and power sources that the vendor library routes to the
+same logical interrupt.
 
 Run the receive-and-restart qualification against that installed image:
 
@@ -57,16 +60,13 @@ It refuses an already-active radio, performs three passive scan/start/stop
 cycles, checks a stable MAC and full SRAM return, and leaves RF off. It does
 not join a network, save credentials or include SSIDs in the report. An empty
 scan fails receive qualification rather than passing just because its timer
-completed. Association, traffic, both-band coverage, RF performance and
-coexistence need separate qualification.
+completed. Traffic, RF performance and range need separate qualification.
 
-Current qualification: native start/stop and scan completion work, with full
-SRAM return, but captured native scans have not received APs. The pinned SDK
-control received one AP in early scans and later returned empty scans too,
-including its default configuration. That is insufficient to qualify native
-reception or assign a confirmed cause. Association and packet traffic are not
-tested. Keep this opt-in adapter experimental until reception is reproduced
-against a nearby controlled AP and the board's antenna is checked.
+Current qualification (2026-10-10, DevKitC-1, a dense office): a passive scan
+of both bands finishes in 15 s with 154 APs, and 31 s with 208 to 215 APs
+while BLE scans or advertises beside it; an open join lands on a 5 GHz
+channel in 12 s and holds while BLE scans. The C5 profile carries no IP kit,
+so association is as far as the shell goes on this chip.
 
 ## BLE
 
@@ -109,9 +109,38 @@ wrapper was not compiled for this platform, and the C5 TRNG refused to run
 while the PHY owned the analog bus (it now reads the RF-fed RNG register in
 that state). The earlier BlueZ host runs, which dropped the link before GATT
 discovery and logged malformed advertising report types, were that pairing
-failure seen from the host side. Throughput, range and Wi-Fi/BLE
-coexistence are not qualified. Enabling Wi-Fi and BLE together is a build
-error.
+failure seen from the host side. Throughput and range are not qualified.
+
+## Coexistence
+
+```sh
+sh drivers/wifi/esp/c5/fetch.sh --all
+make MCU=esp32c5 HAS_DRIVERS=1 HAS_TIKUKITS=1 HAS_TESTS=0 HAS_EXAMPLES=0 \
+    TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_ESP32C5_XIP_CODE=1 \
+    TIKU_DRV_WIFI_ESP_ENABLE=1 TIKU_DRV_BLE_ESP_ENABLE=1 \
+    BUILD_DIR=build/esp32c5-coex \
+    TOOLCHAIN_DIR=/path/to/riscv-toolchain TOOLCHAIN_PREFIX=riscv-none-elf- \
+    ESP_PYTHON=/path/to/venv/bin/python ESPTOOL=/path/to/venv/bin/esptool
+```
+
+With both radios built, the C61's arbiter adapter (`../esp_coex.c`) serves
+the C5 too: the adapter table is the same, the chip's crystal frequency is
+read from the ROM's record, and `espw_arch_in_isr` is the C5's. The arbiter's
+code and constants run from the XIP window; its two `.coexiram` routines stay
+in SRAM, as on the C61. `fetch.sh --coex` pins `libcoexist.a` from
+`esp-coex-lib` `c758e7b56e0fa22177a0539796e1df59978dc322`, `esp32c5/`,
+checked by `SHA256SUMS-coex`; it is the C61's archive plus IEEE 802.15.4
+hooks, with the same ROM symbol list. The two radios share one 96 KiB heap
+(`TIKU_DRV_ESP_COEX_HEAP_BYTES`), taken by the first radio up: Wi-Fi's
+packet buffers stay in SRAM on a module without PSRAM, and a both-band scan
+beside BLE peaked at 85 KiB with nothing refused. `wifi on` reports
+`[esp] coexistence 2.0.0` once per boot.
+
+TikuBench's `coex` suite accepts `--board esp32c5`: both radios up, Wi-Fi
+scans while BLE scans and advertises, the joined link held while BLE works
+(with `--ssid`/`--psk`; no pings, the profile has no IP kit), and the heap
+back whichever radio goes down first. The C5's both-band scan takes 31 s
+under the arbiter, so the suite allows 45 s there.
 
 ## Receive-only SDR
 

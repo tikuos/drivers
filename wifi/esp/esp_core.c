@@ -28,10 +28,15 @@ static uint8_t      core_osi_started;
 static tiku_arena_t core_heap_arena;
 static tiku_arena_t core_ext_arena;
 
-/* Both radios at once: Wi-Fi, its packet buffers in PSRAM, peaks at 22 KB of
- * SRAM, BLE at 33 KB. */
+/* Both radios at once.  C61: Wi-Fi, its packet buffers in PSRAM, peaks at
+ * 22 KB of SRAM, BLE at 33 KB.  C5: Wi-Fi's buffers stay in SRAM and a scan
+ * of both bands holds every record it heard, 64 KB alone; BLE 40 KB. */
 #ifndef TIKU_DRV_ESP_COEX_HEAP_BYTES
+#if defined(PLATFORM_ESP32C5)
+#define TIKU_DRV_ESP_COEX_HEAP_BYTES (96U * 1024U)
+#else
 #define TIKU_DRV_ESP_COEX_HEAP_BYTES (60U * 1024U)
+#endif
 #endif
 
 static const char *core_name(uint8_t radio) {

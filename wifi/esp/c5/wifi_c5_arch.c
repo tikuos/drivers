@@ -156,3 +156,8 @@ int espw_c5_random(uint8_t *out, size_t length)
      * the analog bus, and the SAR source otherwise. */
     return tiku_trng_arch_read_bytes(out, length);
 }
+
+unsigned espw_c5_xtal_mhz(void)
+{
+    return (TIKU_C5_REG_READ(0x60096110u) >> 24) & 127u;
+}

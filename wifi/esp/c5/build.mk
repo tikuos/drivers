@@ -45,9 +45,6 @@ ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 ifneq ($(TIKU_THREADS_ENABLE):$(TIKU_ESP32C5_XIP_CODE),1:1)
 $(error C5 radios require TIKU_THREADS_ENABLE=1 TIKU_ESP32C5_XIP_CODE=1)
 endif
-ifeq ($(TIKU_DRV_WIFI_ESP_ENABLE):$(TIKU_DRV_BLE_ESP_ENABLE),1:1)
-$(error C5 simultaneous Wi-Fi/BLE requires a qualified coexistence adapter)
-endif
 SRCS += $(addprefix drivers/wifi/esp/,esp_core.c esp_osi.c esp_heap.c \
     esp_glue.c c5/wifi_c5_arch.c c5/wifi_c5_phy.c)
 LDFLAGS += -T$(C5_PHY_DIR)/vendor/esp32c5.rom.api.ld
@@ -80,6 +77,18 @@ SRCS += $(addprefix drivers/wifi/esp/,esp_ble.c esp_npl.c esp_mempool.c)
 SRCS += tikukits/crypto/p256/tiku_kits_crypto_p256.c
 CFLAGS += -DTIKU_DRV_BLE_ESP_ENABLE=1
 LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libble_app.a libbtbb.a libphy.a) -lm -lc -lgcc -Wl,--end-group
+endif
+# Both radios: the coexistence arbiter between them, most of it in ROM
+# (esp32c5.rom.coexist.ld, linked with Wi-Fi above), the rest in libcoexist.a.
+ifeq ($(TIKU_DRV_WIFI_ESP_ENABLE):$(TIKU_DRV_BLE_ESP_ENABLE),1:1)
+C5_COEX_HASH_OK := $(shell cd $(C5_PHY_DIR) && \
+    { if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS-coex; \
+      else shasum -a 256 -c SHA256SUMS-coex; fi; } >/dev/null 2>&1 && echo yes)
+ifneq ($(C5_COEX_HASH_OK),yes)
+$(error C5 coexistence asset missing or invalid: run sh $(C5_PHY_DIR)/fetch.sh --coex)
+endif
+SRCS += drivers/wifi/esp/esp_coex.c
+LDLIBS += -Wl,--start-group $(C5_PHY_DIR)/vendor/libcoexist.a -lc -lgcc -Wl,--end-group
 endif
 endif
 endif

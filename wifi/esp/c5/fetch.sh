@@ -4,7 +4,7 @@
 # fetch.sh - fetch pinned ESP32-C5 PHY assets and verify their SHA-256 hashes.
 # SPDX-License-Identifier: Apache-2.0
 set -eu
-case "${1-}" in ""|--wifi|--ble|--all) ;; *) echo "usage: $0 [--wifi|--ble|--all]" >&2; exit 2;; esac
+case "${1-}" in ""|--wifi|--ble|--coex|--all) ;; *) echo "usage: $0 [--wifi|--ble|--coex|--all]" >&2; exit 2;; esac
 cd "$(dirname "$0")"
 PHY=https://raw.githubusercontent.com/espressif/esp-phy-lib/20f1db053a0e6cb9f1c09d255c43bf42483041d0
 ROM=https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c5/ld
@@ -44,5 +44,14 @@ if [ "${1-}" = --ble ] || [ "${1-}" = --all ]; then
         sha256sum -c SHA256SUMS-ble
     else
         shasum -a 256 -c SHA256SUMS-ble
+    fi
+fi
+if [ "${1-}" = --coex ] || [ "${1-}" = --all ]; then
+    COEX=https://raw.githubusercontent.com/espressif/esp-coex-lib/c758e7b56e0fa22177a0539796e1df59978dc322
+    curl --fail --location --max-time 60 -o vendor/libcoexist.a "$COEX/esp32c5/libcoexist.a"
+    if command -v sha256sum > /dev/null; then
+        sha256sum -c SHA256SUMS-coex
+    else
+        shasum -a 256 -c SHA256SUMS-coex
     fi
 fi

@@ -39,5 +39,7 @@
 #define ESPW_ARCH_SYSTIMER_HZ ESP32C61_SYSTIMER_HZ
 #define ESPW_ARCH_F_MEPC TIKU_ESP32C61_F_MEPC
 #define ESPW_ARCH_F_RA TIKU_ESP32C61_F_RA
+/* The DevKitC's crystal; the C5 reads its own. */
+#define ESPW_ARCH_XTAL_MHZ 40u
 #endif
 #endif

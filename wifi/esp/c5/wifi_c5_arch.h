@@ -50,4 +50,7 @@ int espw_c5_radio_prepare(void);
 void espw_c5_radio_release(void);
 /** @brief Random bytes from the platform TRNG, RF-fed while the PHY is on. */
 int espw_c5_random(uint8_t *out, size_t length);
+/** @brief The crystal frequency in MHz as the ROM recorded it: 40 or 48. */
+unsigned espw_c5_xtal_mhz(void);
+#define ESPW_ARCH_XTAL_MHZ espw_c5_xtal_mhz()
 #endif

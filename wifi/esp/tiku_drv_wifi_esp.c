@@ -46,10 +46,14 @@
 /* The libraries' heap, taken from the SRAM tier while the radio is up: 30 KB
  * at rest, 36 KB at most measured joined with IP traffic and a scan; with
  * the receiver built, 32 KB, its packet buffers in PSRAM, so the bank the
- * receiver borrows fits beside it (peak 22 KB measured so). */
+ * receiver borrows fits beside it (peak 22 KB measured so).  The C5 scans
+ * both bands and keeps a 96-byte record per AP heard: 48 KB ran out at 154
+ * APs, with the table lost. */
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
 #if (TIKU_DRV_SDR_ESP_ENABLE + 0)
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (32U * 1024U)
+#elif defined(PLATFORM_ESP32C5)
+#define TIKU_DRV_WIFI_ESP_HEAP_BYTES (64U * 1024U)
 #else
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (48U * 1024U)
 #endif

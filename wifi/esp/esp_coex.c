@@ -1,7 +1,8 @@
 /*
- * Tiku Drivers - ESP32-C61 radios, coexistence: Wi-Fi and BLE on one RF
+ * Tiku Drivers - ESP32-C61 and ESP32-C5 radios, coexistence: Wi-Fi and BLE
+ * on one RF
  *
- * Espressif's arbiter -- most of it in the C61's ROM, the rest in
+ * Espressif's arbiter -- most of it in the chip's ROM, the rest in
  * libcoexist.a -- grants the shared radio to one stack at a time.  It runs on
  * this adapter, the shim's semaphores, timers and heap, registered once per
  * boot (the ROM keeps the pointer; its one lock sits in the static lock
@@ -19,8 +20,8 @@
 #include <stdio.h>
 
 #include <hal/tiku_printf_hal.h>
-#include <arch/esp32c61/tiku_crt_early.h>
 
+#include "esp_arch.h"
 #include "esp_coex_abi.h"
 #include "esp_heap.h"
 #include "esp_port.h"
@@ -42,7 +43,7 @@ static int32_t coexa_give_from_isr(void *semphr, void *hptw) {
 }
 
 static int coexa_in_isr(void) {
-    return tiku_esp32c61_in_isr();
+    return espw_arch_in_isr();
 }
 
 static void coexa_nothing(void) {
@@ -60,7 +61,7 @@ static int coexa_no_debug(int event, int signal, bool rev) {
 }
 
 static int coexa_xtal_mhz(void) {
-    return 40;
+    return (int)ESPW_ARCH_XTAL_MHZ;
 }
 
 /* The arbiter's pre-init allocates its function table once per boot and

@@ -167,7 +167,7 @@ void espw_modem_bt_on(void)
     if (bt_clocked) {
         return;
     }
-    xtal = (TIKU_C5_REG_READ(0x60096110u) >> 24) & 127u;
+    xtal = espw_c5_xtal_mhz();
     if (xtal != 40u && xtal != 48u) {
         tiku_c5_fatal("BLE crystal unsupported");
     }
