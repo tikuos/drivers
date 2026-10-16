@@ -53,7 +53,9 @@ make flash MCU=esp32c61 TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_DRV_WIFI_
 ```
 
 BLE, with `TIKU_DRV_BLE_ESP_ENABLE=1` in place of (or beside) the Wi-Fi
-flag.  Both together need `TIKU_ESP32C61_XIP_CODE=1` to fit SRAM, and then
+flag.  A BLE build runs the host's code from flash: `TIKU_ESP32C61_XIP_CODE`
+is 1 unless the make line says otherwise, as the code in SRAM leaves the
+tier short of the controller's 40 KB heap.  With Wi-Fi beside it, the two
 share one heap and Espressif's coexistence arbiter (see Coexistence).
 
 For IP over the radio add the lean net stack, with kernel code run from flash
@@ -188,8 +190,8 @@ it imports -- clocks the BLE MAC, and initialises and enables the
 controller in the order IDF does.  The controller's code runs from flash,
 as IDF's run-in-flash-only mode places it, with that mode's relaxed timing;
 only its 2 KB of hot paths and its data stay in SRAM.  Its configuration is
-IDF's default cut to what the host uses -- one link, a 23-byte ATT MTU,
-legacy advertising: 8 high-priority event buffers, 4 ACL buffers of 255
+IDF's default cut to what the host uses -- one link, legacy advertising:
+8 high-priority event buffers, 4 ACL buffers of 255
 bytes, 251-byte advertising data, msys 8 x 256 + 8 x 320 -- a quarter less
 memory than IDF's.  The address is the factory MAC's third universal one
 (last byte + 2).  `bt off` stops it all and gives the heap back.
@@ -199,6 +201,18 @@ waits for the controller's first HCI NOP before the host starts, and lets
 its task finish before each command (it frees a command's buffer only
 after the reply).  `bt status` shows the heap and the radio's interrupts.
 `EXTRA_CFLAGS=-DESPB_TRACE=1` traces every HCI command, event and receive.
+
+The controller has the data length extension and the 2M PHY, so the host
+asks every new link for 251-byte packets and 2M, and a central asks for a
+247-byte ATT MTU; `bt connections` shows `PHY 2M/2M  packets 251/251 B  MTU
+247`.  `bt bench` from a C61 to a C5 measures 19.9 KB/s of notifications
+with 251-byte packets and 1.6 KB/s with 27 (`bt dle 27`), on either PHY:
+about four notifications per 50 ms connection event.  Pairing is by passkey
+entry or numeric comparison when both ends set an IO capability (`bt io`),
+and `bt privacy on` advertises, scans and connects from resolvable private
+addresses made from the host's durable IRK; a bonded peer that gave its
+identity keys is found behind its own.  TikuBench's `bt-link` suite runs
+all three between a C61 and a C5.
 
 ## Coexistence
 

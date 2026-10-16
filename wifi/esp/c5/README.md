@@ -122,7 +122,11 @@ connect, the C5's Security Request answered with LE Secure Connections pairing
 (the nRF's stack makes the P-256 keys itself), the bond stored, the link
 encrypted, then subscribe, `info` written with its carriage return and the
 answer back in notifications; the C5 needs tikukits 85e04cc for its pairing
-entropy. Throughput and range are not qualified.
+entropy. Links to the C61 run at 2M with 251-byte packets and a 247-byte
+MTU: `bt bench` measures 19.2 KB/s of notifications from the C5 and
+19.9 KB/s to it. The `bt-link` suite also pairs the two by numeric
+comparison and passkey entry, and finds each behind the other's private
+addresses (`bt privacy on`). Range is not qualified.
 
 ## Coexistence
 
