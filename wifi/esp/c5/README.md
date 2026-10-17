@@ -237,10 +237,13 @@ suite silently powers down a radio already owned by another user.
 
 Add `TIKU_DRV_SDR_ESP_TX_ENABLE=1` to the C5 SDR build above. It requires
 `TIKU_DRV_SDR_ESP_ENABLE=1` and XIP, and excludes concurrent Wi-Fi, BLE and
-IEEE 802.15.4. The C61 exposes receiver support; this TX API targets the C5.
+IEEE 802.15.4. The shared TX API reports each target's supported carrier grids.
 
 Playback repeats a waveform from internal SRAM at 80 MS/s on channel centres
-2412–2462 MHz in 5 MHz steps. The accepted length is 256–16128 complex samples
+2412–2462 MHz in 5 MHz steps, 5180–5240 MHz in 20 MHz steps and
+5745–5825 MHz in 20 MHz steps. Frequencies between these ranges and centers
+outside their grids are refused before PHY startup. The accepted length is
+256–16128 complex samples
 in multiples of 256. A word holds signed two's complement I10 in bits 9:0
 and Q10 in bits 19:10, with bits 31:20 zero. Files use little-endian words.
 The sample codes and RF output power are uncalibrated. The generated tone
@@ -252,13 +255,14 @@ sdr tx info
 sdr stop
 sdr tx tone 16 64
 sdr tx send 2437 100
+sdr tx send 5180 100
 sdr tx clear
 sdr start
 ```
 
 This example repeats 16 cycles in 1024 samples, giving a +1.25 MHz offset
-from 2437 MHz. Negative cycles select the opposite offset; zero selects a
-carrier. `sdr tx begin <words>` starts a sequential upload, followed by
+from each selected carrier center. Negative cycles select the opposite offset;
+zero selects a carrier. `sdr tx begin <words>` starts a sequential upload, followed by
 `sdr tx put <offset> <eight-digit-hex-word>...` with up to eight words per
 line. Each accepted command returns `TX load <written> <expected>`.
 `sdr tx status` reports the same counters. Loading data does not enable RF.
@@ -284,7 +288,7 @@ The implementation uses the pinned C5 vendor PHY and C5 register definitions.
 The TX source and protocol are independently written under Apache-2.0; no
 source from `whstudio123/esp32-iq-tx` is included. The supported waveform path
 is preloaded repetition, rather than a host-fed continuous IQ stream. It
-does not implement packet modulation, timed playback or 5 GHz TX.
+does not implement packet modulation or scheduled playback.
 
 `TikuBench/tools/esp32c5_sdr_tx_check.py` takes explicit C5 native USB and C61
 UART ports. It records positive/negative frequency shifts at three channel

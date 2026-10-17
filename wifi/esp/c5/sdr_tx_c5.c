@@ -59,6 +59,15 @@ static const uint32_t register_address[] = {
     OWNER, CAPTURE, SOURCE, PLAY, CLOCK, WIFI_CLOCK
 };
 
+unsigned tiku_drv_sdr_tx_esp_bands(const tiku_sdr_tx_band_t **bands)
+{
+    static const tiku_sdr_tx_band_t channels[] = {
+        {2412, 2462, 5}, {5180, 5240, 20}, {5745, 5825, 20}
+    };
+    if (bands) { *bands = channels; }
+    return sizeof channels / sizeof *channels;
+}
+
 /** @brief Serialize calls from the kernel foreground with interrupts enabled. */
 static int enter(void)
 {
@@ -228,7 +237,7 @@ int tiku_drv_sdr_tx_esp_send(uint32_t mhz, uint32_t ms,
     uint64_t first;
     int rc = TIKU_SDR_TX_BUSY, cleanup, prepared = 0;
     if (out) { memset(out, 0, sizeof(*out)); }
-    if (!out || mhz < 2412 || mhz > 2462 || (mhz - 2412) % 5 ||
+    if (!out || !tiku_sdr_tx_frequency(mhz) ||
         !ms || ms > TIKU_SDR_TX_MS_MAX) { return TIKU_SDR_TX_PARAM; }
     if (!enter()) { return faulted ? TIKU_SDR_TX_FAULT : TIKU_SDR_TX_BUSY; }
     if (!held || !tiku_drv_sdr_esp_reserved() || !loaded || loaded != expected ||

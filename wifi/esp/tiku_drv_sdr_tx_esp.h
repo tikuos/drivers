@@ -20,6 +20,26 @@
 #define TIKU_SDR_TX_UNSUPPORTED -5
 #define TIKU_SDR_TX_GUARD -6
 
+/** @brief Inclusive carrier-center range with a step measured from low_mhz. */
+typedef struct {
+    uint32_t low_mhz, high_mhz, step_mhz;
+} tiku_sdr_tx_band_t;
+
+/** @brief Return the band count and optionally its stable read-only table. */
+unsigned tiku_drv_sdr_tx_esp_bands(const tiku_sdr_tx_band_t **bands);
+
+/** @brief Whether a carrier center belongs to an advertised TX channel grid. */
+static inline int tiku_sdr_tx_frequency(uint32_t mhz)
+{
+    const tiku_sdr_tx_band_t *bands;
+    unsigned count = tiku_drv_sdr_tx_esp_bands(&bands), n;
+    for (n = 0; n < count; n++) {
+        if (mhz >= bands[n].low_mhz && mhz <= bands[n].high_mhz &&
+            (mhz - bands[n].low_mhz) % bands[n].step_mhz == 0) { return 1; }
+    }
+    return 0;
+}
+
 /** @brief Completion data for one bounded playback; levels are uncalibrated. */
 typedef struct {
     uint32_t hz;             /**< Native playback rate. */
@@ -46,7 +66,7 @@ int tiku_drv_sdr_tx_esp_write(uint32_t offset, const uint32_t *samples,
  */
 int tiku_drv_sdr_tx_esp_tone(int cycles, unsigned amplitude);
 /** @brief Repeat a complete waveform for 1..1000 ms, then stop the PHY.
- * @param mhz 2412..2462 MHz in 5 MHz steps.
+ * @param mhz Carrier center on a grid returned by tiku_drv_sdr_tx_esp_bands().
  * @param started Optional foreground notification after PLAY starts; return
  * promptly. Its runtime counts toward the playback interval.
  * @note Calibration/preparation can emit RF and have no software timeout.

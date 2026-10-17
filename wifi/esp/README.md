@@ -308,8 +308,12 @@ sdr tx clear
 sdr start
 ```
 
-`TXCAP 1` advertises the limits to TikuSDR's Transmission section. The
-app stops RX, uploads or generates a waveform, sends one burst, clears
+`TXCAP 1` advertises the upload, playback and 2.4 GHz limits to TikuSDR's
+Transmission section. An additional `TXBANDS 1 <count> <low> <high> <step>...`
+line reports the carrier grids in MHz. C61 reports one grid, 2412–2462 MHz
+in 5 MHz steps. C5 also reports 5180–5240 and 5745–5825 MHz in 20 MHz steps.
+Clients that read the legacy capability line retain their 2.4 GHz choices.
+The app stops RX, uploads or generates a waveform, sends one burst, clears
 its reservation and restarts RX. In a C61 TX build, `sdr stop` powers
 Wi-Fi down before returning an RX bank. A loaded TX waveform prevents
 Wi-Fi and RX from starting. A separate Wi-Fi session must be stopped
@@ -324,7 +328,7 @@ the bank reserved and refuses further TX operations until reset.
 IQ amplitude and output power are uncalibrated. PHY preparation can emit
 RF before timed playback and has no software timeout. The interface sends
 bounded preloaded bursts; it does not provide streaming, simultaneous RX
-and TX, or 5 GHz TX. The probe commands selected by
+and TX. C61 TX is limited to 2.4 GHz. The probe commands selected by
 `TIKU_DRV_SDR_ESP_PROBE=1` expose separate calibration and loopback controls.
 
 ## Files
