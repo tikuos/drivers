@@ -9,6 +9,7 @@
 .xip.sdr :
 {
     *esp_sdr.o(.text .text.* .rodata .rodata.* .srodata .srodata.*)
+    *sdr_tx_c61.o(.text .text.* .rodata .rodata.* .srodata .srodata.*)
     . = ALIGN(4);
 } > XIP
 

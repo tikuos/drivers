@@ -13,7 +13,7 @@
 #include <drivers/wifi/esp/tiku_drv_sdr_tx_esp.h>
 #include "tiku_drv_phy_c5.h"
 #include "sdr_c5.h"
-#include "sdr_tx_sine.h"
+#include "../sdr_tx_sine.h"
 #if (TIKU_THREADS_ENABLE + 0)
 #include <kernel/threads/tiku_thread.h>
 #endif

@@ -1,12 +1,14 @@
 # C5 PHY calibration and RF lifecycle, independent of the C61 MAC adapters.
 ifeq ($(TIKU_DRV_SDR_ESP_TX_ENABLE),1)
-ifneq ($(MCU),esp32c5)
-$(error SDR IQ transmission requires MCU=esp32c5)
+ifeq ($(filter esp32c5 esp32c61,$(MCU)),)
+$(error SDR IQ transmission requires MCU=esp32c5 or esp32c61)
 endif
 ifneq ($(TIKU_DRV_SDR_ESP_ENABLE),1)
 $(error SDR IQ transmission requires TIKU_DRV_SDR_ESP_ENABLE=1)
 endif
+ifeq ($(MCU),esp32c5)
 SRCS += drivers/wifi/esp/c5/sdr_tx_c5.c
+endif
 CFLAGS += -DTIKU_DRV_SDR_ESP_TX_ENABLE=1
 endif
 ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE) $(TIKU_DRV_154_C5_ENABLE)))),)

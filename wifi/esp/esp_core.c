@@ -20,6 +20,9 @@
 #endif
 #include "esp_heap.h"
 #include "esp_port.h"
+#if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0) && defined(PLATFORM_ESP32C61)
+#include "tiku_drv_sdr_tx_esp.h"
+#endif
 
 static uint8_t      core_radios;
 static uint8_t      core_heap_taken;
@@ -41,7 +44,8 @@ static tiku_arena_t core_ext_arena;
 
 static const char *core_name(uint8_t radio) {
     return radio == ESPW_RADIO_BLE ? "BLE" :
-           radio == ESPW_RADIO_154 ? "15.4" : "Wi-Fi";
+           radio == ESPW_RADIO_154 ? "15.4" :
+           radio == ESPW_RADIO_SDR ? "SDR" : "Wi-Fi";
 }
 
 /** @brief Packet buffers' block from the PSRAM tier, bringing PSRAM up if
@@ -71,6 +75,14 @@ static void core_ext_take(uint32_t bytes) {
 
 int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
+
+#if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0) && defined(PLATFORM_ESP32C61)
+    if ((radio != ESPW_RADIO_SDR && tiku_drv_sdr_tx_esp_held()) ||
+        (radio == ESPW_RADIO_SDR &&
+         (!tiku_drv_sdr_tx_esp_held() || !espw_core_idle()))) {
+        return -1;
+    }
+#endif
 
     if (core_radios == 0U && core_osi_started) {
         TIKU_PRINTF("[esp] previous radio workers still active; restart refused\n");
@@ -156,4 +168,8 @@ void espw_core_down(uint8_t radio) {
 
 uint8_t espw_core_radios(void) {
     return core_radios;
+}
+
+int espw_core_idle(void) {
+    return !core_radios && !core_osi_started && !core_heap_taken && !core_ext_taken;
 }

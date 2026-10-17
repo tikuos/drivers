@@ -7,6 +7,20 @@
 # Their code links into the XIP window (the esp_*xip.ld fragments) and
 # `make flash` writes it as xip.bin beside the boot image.
 
+ifeq ($(MCU),esp32c61)
+ifeq ($(TIKU_DRV_SDR_ESP_TX_ENABLE),1)
+ifneq ($(TIKU_DRV_WIFI_ESP_ENABLE),1)
+$(error C61 SDR TX requires TIKU_DRV_WIFI_ESP_ENABLE=1)
+endif
+ifneq ($(TIKU_ESP32C61_XIP_CODE),1)
+$(error C61 SDR TX requires TIKU_ESP32C61_XIP_CODE=1)
+endif
+ifeq ($(TIKU_DRV_BLE_ESP_ENABLE),1)
+$(error C61 SDR TX requires a profile without BLE)
+endif
+endif
+endif
+
 ifneq ($(MCU),esp32c5)
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 ifneq ($(MCU),esp32c61)
@@ -82,6 +96,10 @@ endif
 SRCS    += $(ESPW_DIR)/esp_sdr.c
 CFLAGS  += -DTIKU_DRV_SDR_ESP_ENABLE=1
 TIKU_XIP_LDS += $(ESPW_DIR)/esp_sdr_xip.ld
+ifeq ($(TIKU_DRV_SDR_ESP_TX_ENABLE),1)
+SRCS += $(ESPW_DIR)/sdr_tx_c61.c
+CFLAGS += -DTIKU_SHELL_HISTORY_DEPTH=8
+endif
 # Its transmit side's lab probes, only when asked for.
 ifeq ($(TIKU_DRV_SDR_ESP_PROBE),1)
 CFLAGS  += -DTIKU_DRV_SDR_ESP_PROBE=1

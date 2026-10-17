@@ -1,7 +1,7 @@
 /*
  * Tiku Drivers
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
- * tiku_drv_sdr_tx_esp.h - C5 preloaded IQ10 transmission at 80 MS/s.
+ * tiku_drv_sdr_tx_esp.h - C5/C61 preloaded IQ10 transmission at 80 MS/s.
  * SPDX-License-Identifier: Apache-2.0
  */
 #ifndef TIKU_DRV_SDR_TX_ESP_H_
@@ -29,7 +29,7 @@ typedef struct {
     uint32_t owner;          /**< SRAM owner readback while running. */
 } tiku_sdr_tx_result_t;
 
-/** @brief Reserve the C5 bank for a sequential upload without powering RF.
+/** @brief Reserve the SDR bank for a sequential upload without powering RF.
  * @note Kernel foreground with interrupts enabled; refuses an RX/PHY owner.
  * A successful begin replaces the previous TX waveform. Count is a multiple
  * of 256, from 256 through 16128. Invalid arguments preserve the waveform.

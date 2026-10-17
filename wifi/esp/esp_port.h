@@ -29,6 +29,7 @@
 #define ESPW_RADIO_WIFI     (1U << 0)
 #define ESPW_RADIO_BLE      (1U << 1)
 #define ESPW_RADIO_154      (1U << 2)
+#define ESPW_RADIO_SDR      (1U << 3)
 
 /* BLE built with Wi-Fi or with the C5's 15.4 MAC: they may run at once,
  * under the coexistence arbiter. */
@@ -55,6 +56,9 @@ void espw_coex_start(void);
 
 /** @brief The radios up now (ESPW_RADIO_*). */
 uint8_t espw_core_radios(void);
+
+/** @brief Whether radios, workers and their allocated heaps are stopped. */
+int espw_core_idle(void);
 
 /* esp_osi.c ---------------------------------------------------------------*/
 

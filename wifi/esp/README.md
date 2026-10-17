@@ -16,7 +16,7 @@ The design notes, milestones and decisions live in
 | R0 | Libraries link; their code runs from flash (XIP) | done: boot prints the PHY version from flash-resident code |
 | R1 | PHY + MAC up: RF calibration, MAC address, init/start OK | done: `wifi on` calibrates in 66 ms, starts the station, reports the MAC |
 | R2 | Scan through `tiku_wireless` | done: `wifi scan` finds the APs around the bench (30-36 in 2.4 s) |
-| R3 | Join: open network, then WPA2-PSK (clean-room supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
+| R3 | Join: open network, then WPA2-PSK (independent supplicant) | done: joins an open network in 2.5 s; the WPA2 handshake proved against a scripted AP on the host |
 | R4 | DHCP, ping, UDP/HTTP; TikuBench net rows | in part: DHCP, DNS and ping over the radio (TikuBench wifi tests 12-14); HTTPS builds and runs to the network with code in flash and buffers in PSRAM -- live sites wait on an open network |
 | R5 | Radio off: sleep numbers unchanged | pending |
 | R6 | BLE: the LE controller under tikuOS's own host stack | in part: `bt on` brings the controller up (HCI Reset, version, address through the host), `bt scan` finds the advertisers around the bench, `bt advertise` runs; TikuBench bt 114/114 on the C61; Wi-Fi and BLE run together through Espressif's coexistence arbiter; connections need a second device |
@@ -274,11 +274,58 @@ reaches the rail (more than four samples at +-510) is taken again 16 lower;
 the SPEC line says the index it was heard at, and `held`, so a viewer can
 raise it back.
 
-The transmit side has no counterpart: the dump unit is receive-only and the
-PHY's calibration plays tones, never samples.  What was found -- the tone
-generators, the transmit test mode, the internal loopback through which the
-chip hears its own tone -- is in lab verbs built with
-`TIKU_DRV_SDR_ESP_PROBE=1` alone.
+## IQ transmission
+
+`TIKU_DRV_SDR_ESP_TX_ENABLE=1` adds preloaded IQ10 transmission to the C61
+SDR profile. Build with Wi-Fi, threads and XIP enabled, without BLE:
+
+```sh
+make MCU=esp32c61 HAS_DRIVERS=1 HAS_TIKUKITS=0 HAS_TESTS=0 HAS_EXAMPLES=0 \
+  TIKU_SHELL_ENABLE=1 TIKU_THREADS_ENABLE=1 TIKU_ESP32C61_XIP_CODE=1 \
+  TIKU_DRV_WIFI_ESP_ENABLE=1 TIKU_DRV_SDR_ESP_ENABLE=1 \
+  TIKU_DRV_SDR_ESP_TX_ENABLE=1
+```
+
+Flash `main.bin` at 0 and its matching `xip.bin` at `0x100000` through the
+C61's explicit native USB port. The TX build keeps eight shell history
+entries so static SRAM stays below bank 3.
+
+The TX API in `tiku_drv_sdr_tx_esp.h` accepts 256 through 16128 samples,
+in multiples of 256. Each little-endian 32-bit word contains signed I10 in
+bits 9:0, signed Q10 in bits 19:10, and zero in the upper twelve bits.
+Playback repeats the loaded waveform at 80 MS/s for 1 through 1000 ms,
+on 2412 through 2462 MHz in 5 MHz steps. Uploads are sequential and each
+chunk is validated before writing. A generated tone has 1024 samples,
+-128 through 128 cycles, and amplitude 1 through 128.
+
+```text
+sdr stop
+wifi off
+sdr tx info
+sdr tx tone 16 64
+sdr tx send 2437 100
+sdr tx clear
+sdr start
+```
+
+`TXCAP 1` advertises the limits to TikuSDR's Transmission section. The
+app stops RX, uploads or generates a waveform, sends one burst, clears
+its reservation and restarts RX. In a C61 TX build, `sdr stop` powers
+Wi-Fi down before returning an RX bank. A loaded TX waveform prevents
+Wi-Fi and RX from starting. A separate Wi-Fi session must be stopped
+before beginning TX.
+
+TX starts the shared radio core and PHY with the Wi-Fi MAC stopped.
+It disables both PHY NCOs and hands SRAM bank 3 to the playback engine.
+After playback it stops RF, restores registers and checks the waveform's
+hash and trailing guard words. A stop or radio-core teardown fault keeps
+the bank reserved and refuses further TX operations until reset.
+
+IQ amplitude and output power are uncalibrated. PHY preparation can emit
+RF before timed playback and has no software timeout. The interface sends
+bounded preloaded bursts; it does not provide streaming, simultaneous RX
+and TX, or 5 GHz TX. The probe commands selected by
+`TIKU_DRV_SDR_ESP_PROBE=1` expose separate calibration and loopback controls.
 
 ## Files
 
@@ -296,6 +343,8 @@ chip hears its own tone -- is in lab verbs built with
 - `esp_sdr.c`, `tiku_drv_sdr_esp.h`, `esp_sdr_xip.ld` -- the receiver:
   the bank's loan, the dump unit, the on-board spectra; and the transmit
   side's lab probes
+- `sdr_tx_c61.c`, `tiku_drv_sdr_tx_esp.h` -- exclusive IQ10 transmission,
+  sequential uploads, bounded playback and RF cleanup
 - `esp_osi.c` -- the OS the libraries run on: locks and queues over kernel
   wait queues, tasks as worker threads, timers on SYSTIMER's driver alarm,
   their interrupt lines on the radio's CLIC lines
