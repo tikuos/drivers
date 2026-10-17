@@ -1,4 +1,14 @@
 # C5 PHY calibration and RF lifecycle, independent of the C61 MAC adapters.
+ifeq ($(TIKU_DRV_SDR_ESP_TX_ENABLE),1)
+ifneq ($(MCU),esp32c5)
+$(error SDR IQ transmission requires MCU=esp32c5)
+endif
+ifneq ($(TIKU_DRV_SDR_ESP_ENABLE),1)
+$(error SDR IQ transmission requires TIKU_DRV_SDR_ESP_ENABLE=1)
+endif
+SRCS += drivers/wifi/esp/c5/sdr_tx_c5.c
+CFLAGS += -DTIKU_DRV_SDR_ESP_TX_ENABLE=1
+endif
 ifneq ($(filter 1,$(TIKU_DRV_PHY_C5_ENABLE) $(and $(filter esp32c5,$(MCU)),$(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE) $(TIKU_DRV_154_C5_ENABLE)))),)
 ifneq ($(MCU),esp32c5)
 $(error TIKU_DRV_PHY_C5_ENABLE requires MCU=esp32c5)
@@ -30,7 +40,7 @@ ifneq ($(TIKU_ESP32C5_XIP_CODE),1)
 $(error C5 SDR requires TIKU_ESP32C5_XIP_CODE=1)
 endif
 ifeq ($(TIKU_DRV_SDR_ESP_PROBE),1)
-$(error C5 SDR supports receive-only operation; transmit probes are not supported)
+$(error C5 SDR uses TIKU_DRV_SDR_ESP_TX_ENABLE for IQ playback; C61 probes are unsupported)
 endif
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
 $(error C5 SDR is a profile of its own; build it without Wi-Fi or BLE)

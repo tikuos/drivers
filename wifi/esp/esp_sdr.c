@@ -23,6 +23,9 @@
 #include "esp_abi.h"
 #include "esp_port.h"
 #include "tiku_drv_sdr_esp.h"
+#if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0)
+#include "tiku_drv_sdr_tx_esp.h"
+#endif
 
 /* C61 HP_SYSTEM_SRAM_USAGE_CONF: bits 12..8 select 64 KiB banks;
  * bit 16 shifts the dump address. C5 uses its separate 128 KiB bank map. */
@@ -119,6 +122,9 @@ int tiku_drv_sdr_esp_reserve(void) {
 }
 
 void tiku_drv_sdr_esp_release(void) {
+#if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0)
+    if (tiku_drv_sdr_tx_esp_held()) { return; }
+#endif
     if (sdr_reserved) {
 #if defined(PLATFORM_ESP32C5)
         if (tiku_sdr_c5_power(0) != 0) { return; }

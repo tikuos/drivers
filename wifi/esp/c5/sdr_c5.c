@@ -14,6 +14,9 @@
 #include <arch/esp32c5/tiku_systimer_arch.h>
 #include <arch/esp32c5/tiku_cpu_common.h>
 #include <drivers/wifi/esp/tiku_drv_sdr_esp.h>
+#if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0)
+#include <drivers/wifi/esp/tiku_drv_sdr_tx_esp.h>
+#endif
 #if (TIKU_THREADS_ENABLE + 0)
 #include <kernel/threads/tiku_thread.h>
 #endif
@@ -105,6 +108,9 @@ int tiku_sdr_c5_power(int on)
         return 0;
     }
     if (on) {
+#if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0)
+        if (tiku_drv_sdr_tx_esp_held()) { leave(); return -1; }
+#endif
         if (!tiku_drv_sdr_esp_reserved() || tiku_drv_phy_c5_active() ||
             tiku_drv_phy_c5_on() != 0) {
             leave();

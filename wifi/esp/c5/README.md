@@ -5,7 +5,7 @@ warm wake, and RF shutdown. An optional Wi-Fi build uses C5 vendor libraries
 with the shared TikuOS OS adapter and C5 interrupt, clock and timer bindings.
 There is no ESP-IDF or FreeRTOS runtime dependency. Separate opt-in profiles
 provide BLE, both radios at once under Espressif's coexistence arbiter, and
-receive-only SDR, and IEEE 802.15.4.
+snapshot SDR with preloaded IQ transmission, and IEEE 802.15.4.
 
 ## Build
 
@@ -215,8 +215,8 @@ The `SPEC` protocol supports TikuSDR's spectrum viewer. `sdr bands` reports
 both C5 bands separately. The desktop offers reported 5 GHz channel presets
 and typed frequencies, rejects sweeps across the band gap, and records and
 replays either band. Its occupancy plans remain 2.4 GHz-only. The legacy
-`sdr info` tuning range remains 2400–2500 for compatibility. Transmit probe
-builds are refused.
+`sdr info` tuning range remains 2400–2500 for compatibility. Legacy transmit
+probe builds are refused; IQ playback uses the option below.
 
 TikuBench's `sdr` suite checks both bands at all six rates, three FFT sizes,
 manual/automatic gain, the largest capture, sweeps, invalid inputs and three
@@ -232,6 +232,71 @@ PYTHONPATH=TikuBench python -m tikubench run sdr --board esp32c5 \
 
 Use `bt` instead of `sdr` for the separately installed BLE profile. Neither
 suite silently powers down a radio already owned by another user.
+
+## Preloaded IQ transmission
+
+Add `TIKU_DRV_SDR_ESP_TX_ENABLE=1` to the C5 SDR build above. It requires
+`TIKU_DRV_SDR_ESP_ENABLE=1` and XIP, and excludes concurrent Wi-Fi, BLE and
+IEEE 802.15.4. The C61 exposes receiver support; this TX API targets the C5.
+
+Playback repeats a waveform from internal SRAM at 80 MS/s on channel centres
+2412–2462 MHz in 5 MHz steps. The accepted length is 256–16128 complex samples
+in multiples of 256. A word holds signed two's complement I10 in bits 9:0
+and Q10 in bits 19:10, with bits 31:20 zero. Files use little-endian words.
+The sample codes and RF output power are uncalibrated. The generated tone
+accepts amplitudes 1–128; uploaded data accepts the complete signed IQ10 range.
+The maximum waveform lasts 201.6 microseconds before it repeats.
+
+```text
+sdr tx info
+sdr stop
+sdr tx tone 16 64
+sdr tx send 2437 100
+sdr tx clear
+sdr start
+```
+
+This example repeats 16 cycles in 1024 samples, giving a +1.25 MHz offset
+from 2437 MHz. Negative cycles select the opposite offset; zero selects a
+carrier. `sdr tx begin <words>` starts a sequential upload, followed by
+`sdr tx put <offset> <eight-digit-hex-word>...` with up to eight words per
+line. Each accepted command returns `TX load <written> <expected>`.
+`sdr tx status` reports the same counters. Loading data does not enable RF.
+An incomplete upload cannot transmit.
+
+`sdr tx send <MHz> <ms>` accepts 1–1000 ms. After preparation it reports
+`TX active <MHz> 80000000 <words> <ms>`, then
+`TX done <result> <elapsed-us> <Hz> <words>` after playback stops. Preparation
+uses vendor PHY calibration and a tone setup that can emit RF before the
+active interval; those vendor calls have no software timeout. The active
+interval uses the 16 MHz timer with a polling cap. Disconnecting a host does
+not extend it. The shell processes the next command after the burst finishes.
+
+RX and TX claim the same 128 KiB bank. A loaded TX waveform holds it until
+`sdr tx clear`, including between bursts; `sdr stop` and `sdr release` do not
+free a TX reservation. Stop RX before loading TX, then clear TX before starting
+RX. Calls require the kernel foreground with interrupts enabled. Interrupts
+remain enabled while TX runs. Register ownership, PLAY readback and four guard
+words are checked. Failure to stop PLAY or power off the PHY retains the bank
+and rejects further TX calls until reset.
+
+The implementation uses the pinned C5 vendor PHY and C5 register definitions.
+The TX source and protocol are independently written under Apache-2.0; no
+source from `whstudio123/esp32-iq-tx` is included. The supported waveform path
+is preloaded repetition, rather than a host-fed continuous IQ stream. It
+does not implement packet modulation, timed playback or 5 GHz TX.
+
+`TikuBench/tools/esp32c5_sdr_tx_check.py` takes explicit C5 native USB and C61
+UART ports. It records positive/negative frequency shifts at three channel
+centres, off-state controls, the maximum upload, a QPSK capture and SRAM return.
+Its tone verdict uses approximate gain correction, not calibrated RF power.
+QPSK raw data requires separate demodulation to qualify the waveform.
+With NumPy installed, run
+`python TikuBench/tools/esp32c5_sdr_tx_analyze.py /path/to/capture` from the
+OS root. It estimates carrier offset, sample phase, conjugation and complex
+gain, correlates the known waveform, and counts hard symbol decisions. The
+verdict requires correlation above 0.8, zero bit errors and less than 1% ADC
+clipping. It does not estimate sensitivity or qualify unrelated waveforms.
 
 ## IEEE 802.15.4
 
