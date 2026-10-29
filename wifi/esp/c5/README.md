@@ -65,8 +65,11 @@ completed. Traffic, RF performance and range need separate qualification.
 Current qualification (2026-10-10, DevKitC-1, a dense office): a passive scan
 of both bands finishes in 15 s with 154 APs, and 31 s with 208 to 215 APs
 while BLE scans or advertises beside it; an open join lands on a 5 GHz
-channel in 12 s and holds while BLE scans. The C5 profile carries no IP kit,
-so association is as far as the shell goes on this chip.
+channel in 12 s and holds while BLE scans. With the net kit's Wi-Fi link
+(`TIKU_KITS_NET_WIFI_ENABLE=1`, DHCP, DNS), `wifi up` carries IP over the
+joined network (2026-10-29, an open network on 5 GHz channel 44 at -59 dBm):
+a DHCP lease, four of four pings to the gateway and the resolver, and names
+resolved through it.
 These figures are with an antenna on the WROOM-1U's U.FL connector; without
 one the same both-band scan returned a single AP or none.
 
@@ -155,7 +158,7 @@ beside BLE peaked at 85 KiB with nothing refused. `wifi on` reports
 
 TikuBench's `coex` suite accepts `--board esp32c5`: both radios up, Wi-Fi
 scans while BLE scans and advertises, the joined link held while BLE works
-(with `--ssid`/`--psk`; no pings, the profile has no IP kit), and the heap
+(with `--ssid`/`--psk`; no pings, its build carries no IP kit), and the heap
 back whichever radio goes down first. The C5's both-band scan takes 31 s
 under the arbiter, so the suite allows 45 s there.
 
