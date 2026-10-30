@@ -943,7 +943,9 @@ static uint32_t osi_free_heap(void) {
 static uint32_t osi_rand(void) {
     uint32_t v = 0U;
 
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32C6)
+    if (espw_c6_random((uint8_t *)&v, sizeof(v)) != 0) { abort(); }
+#elif defined(PLATFORM_ESP32C5)
     if (espw_c5_random((uint8_t *)&v, sizeof(v)) != 0) { abort(); }
 #else
     (void)tiku_trng_arch_read_u32(&v);
@@ -956,7 +958,9 @@ static unsigned long osi_random(void) {
 }
 
 static int osi_get_random(uint8_t *buf, size_t len) {
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32C6)
+    return espw_c6_random(buf, len);
+#elif defined(PLATFORM_ESP32C5)
     return espw_c5_random(buf, len);
 #else
     return tiku_trng_arch_read_bytes(buf, len) == 0 ? 0 : -1;

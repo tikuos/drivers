@@ -12,7 +12,9 @@
 #include <stdint.h>
 
 #include <kernel/memory/tiku_mem.h>
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32C6)
+#include "esp_arch.h"
+#elif defined(PLATFORM_ESP32C5)
 #include <arch/esp32c5/tiku_psram_arch.h>
 #include "esp_arch.h"
 #else
@@ -51,6 +53,9 @@ static const char *core_name(uint8_t radio) {
 /** @brief Packet buffers' block from the PSRAM tier, bringing PSRAM up if
  *         it is not yet; without it they come from SRAM, as before. */
 static void core_ext_take(uint32_t bytes) {
+#if defined(PLATFORM_ESP32C6)
+    (void)bytes;
+#else
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
 
 #if defined(PLATFORM_ESP32C5)
@@ -71,6 +76,7 @@ static void core_ext_take(uint32_t bytes) {
     }
     espw_heap_ext_init(core_ext_arena.buf, core_ext_arena.capacity);
     core_ext_taken = 1U;
+#endif
 }
 
 int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
@@ -145,6 +151,9 @@ void espw_core_down(uint8_t radio) {
     }
     ended = !core_osi_started || espw_osi_stop() == 0;
     if (ended) { core_osi_started = 0U; }
+#if defined(PLATFORM_ESP32C6)
+    if (ended) { espw_c6_radio_release(); }
+#endif
 #if defined(PLATFORM_ESP32C5)
     if (ended) { espw_c5_radio_release(); }
 #endif

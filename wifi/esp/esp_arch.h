@@ -6,7 +6,9 @@
  */
 #ifndef TIKU_ESP_RADIO_ARCH_H_
 #define TIKU_ESP_RADIO_ARCH_H_
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32C6)
+#include "c6/wifi_c6_arch.h"
+#elif defined(PLATFORM_ESP32C5)
 #include "c5/wifi_c5_arch.h"
 #else
 #include <arch/esp32c61/tiku_crt_early.h>

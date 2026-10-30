@@ -20,6 +20,12 @@
 #include <kernel/timers/tiku_clock.h>
 #include "esp_abi.h"
 
+#if defined(PLATFORM_ESP32C6)
+#include "c6/wifi_c6_arch.h"
+#undef TIKU_PRINTF
+#define TIKU_PRINTF(...) espw_c6_log(__VA_ARGS__)
+#endif
+
 #define ESPW_PRINTF(...) TIKU_PRINTF("[esp-wifi] " __VA_ARGS__)
 #define ESPB_PRINTF(...) TIKU_PRINTF("[esp-ble] " __VA_ARGS__)
 

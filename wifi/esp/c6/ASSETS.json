@@ -1,0 +1,109 @@
+{
+  "sdk": "4d59230ddff16327812782151ef0afef202dc6d7",
+  "target": "esp32c6",
+  "license": "Apache-2.0",
+  "files": [
+    {
+      "path": "vendor/libnet80211.a",
+      "bytes": 1511866,
+      "sha256": "40c03728cf922d5ee70d0bd78c3573da3ee06b448458f6357117c2df24d0c113",
+      "url": "https://raw.githubusercontent.com/espressif/esp32-wifi-lib/af55a0ca258ce9d791d1661d7c2bbb65f08c0c21/esp32c6/libnet80211.a"
+    },
+    {
+      "path": "vendor/libpp.a",
+      "bytes": 887216,
+      "sha256": "c155f4bf97fda9f2f1c4f72e827d39f490a3aa39a26aaab54b6bd587af64380b",
+      "url": "https://raw.githubusercontent.com/espressif/esp32-wifi-lib/af55a0ca258ce9d791d1661d7c2bbb65f08c0c21/esp32c6/libpp.a"
+    },
+    {
+      "path": "vendor/libcore.a",
+      "bytes": 4108,
+      "sha256": "8c60973bb7f8b0f150d0077201883b34cfaa9733bcf486bceb43870b9f762ce5",
+      "url": "https://raw.githubusercontent.com/espressif/esp32-wifi-lib/af55a0ca258ce9d791d1661d7c2bbb65f08c0c21/esp32c6/libcore.a"
+    },
+    {
+      "path": "vendor/libphy.a",
+      "bytes": 188362,
+      "sha256": "5ebda577864f5e90a34d90317360a5957d6c5ba133446461d697d65297caf04e",
+      "url": "https://raw.githubusercontent.com/espressif/esp-phy-lib/20f1db053a0e6cb9f1c09d255c43bf42483041d0/esp32c6/libphy.a"
+    },
+    {
+      "path": "vendor/libbtbb.a",
+      "bytes": 19818,
+      "sha256": "1843c31dbd6abfabe33439882bf1ad4ffa5ac60d885da98040c0d909872187e2",
+      "url": "https://raw.githubusercontent.com/espressif/esp-phy-lib/20f1db053a0e6cb9f1c09d255c43bf42483041d0/esp32c6/libbtbb.a"
+    },
+    {
+      "path": "vendor/libcoexist.a",
+      "bytes": 100774,
+      "sha256": "c4c340086dec9f52e55cc4e133853526a9af35794d7df70d37aee9c632039793",
+      "url": "https://raw.githubusercontent.com/espressif/esp-coex-lib/c758e7b56e0fa22177a0539796e1df59978dc322/esp32c6/libcoexist.a"
+    },
+    {
+      "path": "vendor/LICENSE-wifi",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://raw.githubusercontent.com/espressif/esp32-wifi-lib/af55a0ca258ce9d791d1661d7c2bbb65f08c0c21/LICENSE"
+    },
+    {
+      "path": "vendor/LICENSE-phy",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://raw.githubusercontent.com/espressif/esp-phy-lib/20f1db053a0e6cb9f1c09d255c43bf42483041d0/LICENSE"
+    },
+    {
+      "path": "vendor/LICENSE-coex",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://raw.githubusercontent.com/espressif/esp-coex-lib/c758e7b56e0fa22177a0539796e1df59978dc322/LICENSE"
+    },
+    {
+      "path": "vendor/LICENSE-idf",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/LICENSE"
+    },
+    {
+      "path": "vendor/esp32c6.rom.ld",
+      "bytes": 13701,
+      "sha256": "e2174360047d1df6a963d3bf49271755fd23b72a65ac85b9ed14aee16035e2f3",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.ld"
+    },
+    {
+      "path": "vendor/esp32c6.rom.api.ld",
+      "bytes": 2930,
+      "sha256": "a09133d722fda5e8bfe28cf533e94c877384708274b78bef1cf17cd6597a8c57",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.api.ld"
+    },
+    {
+      "path": "vendor/esp32c6.rom.coexist.ld",
+      "bytes": 1465,
+      "sha256": "28c00627edefe950ba7ce8a6c9b3b6701b08625dba0589caa3091627314dfcea",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.coexist.ld"
+    },
+    {
+      "path": "vendor/esp32c6.rom.net80211.ld",
+      "bytes": 2093,
+      "sha256": "4acdeceed6d2229367cd18ecf122ec29c257be50340b1777f589426f088fa337",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.net80211.ld"
+    },
+    {
+      "path": "vendor/esp32c6.rom.pp.ld",
+      "bytes": 17586,
+      "sha256": "421e8f9a3f0d3dd11d351398f6e48f0c66ad5b6a350583df400098f44f59ec3b",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.pp.ld"
+    },
+    {
+      "path": "vendor/esp32c6.rom.phy.ld",
+      "bytes": 7435,
+      "sha256": "7332fd77b2aeb34d5d9881e86e26a7521f2b315b3ad4116082f92eb1b6a19f35",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.phy.ld"
+    },
+    {
+      "path": "vendor/esp32c6.rom.version.ld",
+      "bytes": 353,
+      "sha256": "a1e3fff425d56236a07546a2fac04974b59ebedc93c399b58bf1936ff5f12bb0",
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/4d59230ddff16327812782151ef0afef202dc6d7/components/esp_rom/esp32c6/ld/esp32c6.rom.version.ld"
+    }
+  ]
+}

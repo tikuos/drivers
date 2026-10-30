@@ -1,5 +1,8 @@
 # ESP32-C61 Wi-Fi and BLE (Espressif radio libraries)
 
+For the native C6 station adapter and its qualification limits, see
+[`c6/README.md`](c6/README.md).
+
 For the C5 PHY and opt-in native Wi-Fi, BLE and SDR adapters, see
 [`c5/README.md`](c5/README.md). The qualification results below describe C61,
 not C5. The OS adapter is shared; hardware bindings and vendor archives differ.
@@ -132,7 +135,8 @@ sit in a small static pool so that the heap can empty.  `wifi status` and
 default, 1-11), and `wifi list` shows the 16 strongest of what it found.
 The stack consults a supplicant even to scan, for the RSN and WPA
 elements of each AP.  The country table in `esp_glue.c` is a hand-written
-handful of countries' 2.4 GHz rules.
+subset of countries' 2.4 GHz rules, including Thailand (channels 1–13,
+40 MHz maximum bandwidth and a 20 dBm cap).
 
 `wifi connect SSID PSK` joins the strongest AP of that name: a WPA2-PSK
 network, or an open one for an empty passphrase (`wifi connect SSID ""`).
