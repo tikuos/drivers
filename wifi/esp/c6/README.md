@@ -1,4 +1,4 @@
-# ESP32-C6 native Wi-Fi
+# ESP32-C6 native Wi-Fi and BLE
 
 The C6 adapter runs Espressif's station libraries on TikuOS workers, queues,
 locks, allocator and timers. Application execution uses the native C6 kernel.
@@ -26,8 +26,7 @@ make MCU=esp32c6 C6_PROFILE=firmware C6_STORAGE=1 \
 
 Install the application, ELF and memory report with the checked C6 installer
 described in the [native port README](../../../../arch/esp32c6/README.md).
-The Wi-Fi profile requires storage, the shell and workers. It rejects BLE
-and SDR. Leave out `TIKU_KIT_NET_ENABLE=1` for station operation without IP.
+The radio profiles require storage, the shell and workers. They exclude SDR. Leave out `TIKU_KIT_NET_ENABLE=1` for station operation without IP.
 The IP profile includes IPv4, ICMP, UDP, TCP, DHCP and the Wi-Fi link adapter;
 TCP buffers reside in SRAM. DNS and NTP shell commands are disabled in this
 profile.
@@ -102,4 +101,46 @@ Thailand uses channels 1–13 with the pinned SDK's 20 dBm regulatory cap.
 Normal firmware has passed 100 hardware start/stop cycles
 with zero live workers, stack-canary faults or native errors after shutdown.
 The SRAM workspace returns after each cycle, with zero allocation refusals.
-No C6 BLE, IEEE 802.15.4 or SDR qualification is implied by Wi-Fi startup.
+IEEE 802.15.4 and SDR have no C6 driver qualification.
+
+
+## Bluetooth
+
+`sh drivers/wifi/esp/c6/fetch.sh --ble` downloads the C6 controller archive
+and its notice. `ASSETS-ble.json` records the pinned source and hashes;
+`SHA256SUMS-ble` is checked before a BLE build.
+
+Add `TIKU_DRV_BLE_ESP_ENABLE=1` to the native shell/storage profile. The
+controller runs on TikuOS workers and provides in-memory HCI to the existing
+Bluetooth host. The shell provides `bt on`, `bt scan`, `bt list`,
+`bt advertise <name>`, `bt connect`, `bt connections` and `bt off`.
+The host supports one connection, legacy and extended advertising/scanning,
+ATT/GATT and the existing pairing API. Connected links accept `bt phy coded`,
+`bt phy coded-s2` and `bt phy coded-s8`; these request Coded PHY and a local
+transmit coding preference. The controller may override the preference.
+`bt connections` reports Coded without identifying S=2 or S=8.
+`bt advertise-ext <name> coded` advertises on Coded primary and secondary
+PHYs. `bt scan-ext both [prefix]` scans on 1M and Coded; `bt connect <slot>`
+uses the discovered primary PHY. Coded connections retain their initial PHY.
+The API and discovery limits are described in
+[`drivers/ble/ipc/README.md`](../../../ble/ipc/README.md).
+Controller packets are bounded at
+260 bytes including the H4 type byte; ATT MTU can negotiate up to 247.
+
+Wi-Fi and BLE share the RF front end through the coexistence adapter.
+Each MAC enables the coexistence clock after library pre-initialization.
+The RF remains active until its last radio stops. BLE builds use the
+linker-reserved 64 KiB radio span for the shared library heap; the native
+host obtains its command scratch from a memory workspace. Radio shutdown
+retains the heap if workers or live allocations remain.
+
+`TIKU_C6_BLE_SERVICE_ENABLE=1` adds the leased `c6/ble` mailbox to a
+`TIKU_C6_RADIO_SERVICE_ENABLE=1` image. It requires both native radio drivers.
+The controller serves either the C6 host or the P4 host. A native controller
+already powered by C6 refuses a P4 claim. While P4 owns it, C6 application
+HCI and power calls are refused. See the [P4 BLE driver](../../../ble/ipc/README.md)
+for the paired build and recovery contract.
+
+Host checks: `make -C TikuBench/tests/host/kernel c6-ble c6-radio ipc-radio`.
+Board captures and measured qualification results belong in `kintsugi/` or
+`temp/`.

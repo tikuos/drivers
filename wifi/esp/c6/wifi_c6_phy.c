@@ -9,12 +9,17 @@
 #include "wifi_c6_arch.h"
 #include "../esp_port.h"
 #include "../esp_heap.h"
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+#include "../esp_ble_abi.h"
+#endif
 #include <arch/esp32c6/tiku_cpu_common.h>
 #include <string.h>
 #define SYSCON 0x600a9800u
 #define LPCON 0x600af000u
 #define WIFI_CLOCKS 0x7ffu
 #define FE_CLOCKS ((1u << 13) | (1u << 14) | (1u << 15) | (1u << 16))
+#define BT_FIELDS ((1u << 22) | (0x3fu << 25))
+#define BT_RESET ((15u << 15) | (1u << 22) | (1u << 30))
 #define CAL_CLOCKS ((1u << 17) | (1u << 18))
 static const uint32_t registers[] = {SYSCON + 4,   SYSCON + 0x14, SYSCON + 0xc,
                                      LPCON + 0xc,  LPCON + 0x10,  LPCON + 0x18,
@@ -31,6 +36,10 @@ static const uint32_t masks[] = {(1u << 22) | (1u << 28),
 static uint32_t saved[sizeof registers / sizeof registers[0]], tracking_timer[5];
 static void *phy_lock;
 static uint8_t prepared, wifi_inited, active, calibrated, fresh;
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+static uint32_t bt_saved[3];
+static uint8_t bt_clocked;
+#endif
 static uint32_t calibration_us;
 static int calibration_result = -1;
 /* Version 10 C6 defaults, with transmit power capped at 20 dBm. */
@@ -86,6 +95,8 @@ void espw_c6_radio_release(void)
 }
 void espw_modem_wifi_clock_on(void)
 {
+    /* Coexistence pre-init leaves its clock gated; each MAC requires it. */
+    field(LPCON + 0x18, 2u, 2u);
     field(SYSCON + 0x14, WIFI_CLOCKS, WIFI_CLOCKS);
 }
 void espw_modem_wifi_clock_off(void)
@@ -108,10 +119,11 @@ static void track(void *unused)
     (void)unused;
     (void)espw_osi_funcs._mutex_lock(phy_lock);
     if (active)
-        phy_param_track_tot(true, false);
+        phy_param_track_tot((active & 1u) != 0, (active & 2u) != 0);
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
-void espw_phy_enable(void)
+/** @brief Acquire the calibrated RF front end for one radio. */
+static void phy_enable(uint8_t radio)
 {
     (void)espw_osi_funcs._mutex_lock(phy_lock);
     if (!active) {
@@ -135,21 +147,32 @@ void espw_phy_enable(void)
         } else {
             phy_wakeup_init();
         }
-        active = 1;
+        active = radio;
         tiku_c6_trng_radio_set(TIKU_C6_TRNG_RADIO_RF);
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+        field(SYSCON + 0x14, CAL_CLOCKS, bt_clocked ? CAL_CLOCKS : 0);
+        field(SYSCON + 4, (1u << 22) | (1u << 28), bt_clocked ? (1u << 22) | (1u << 28) : 0);
+#else
         field(SYSCON + 0x14, CAL_CLOCKS, 0);
         field(SYSCON + 4, (1u << 22) | (1u << 28), 0);
+#endif
         espw_timer_setfn(tracking_timer, (void *)track, NULL);
         espw_timer_arm_us(tracking_timer, 1000000, true);
     }
-    phy_wifi_enable_set(1);
+    active |= radio;
+    if (radio == 1u)
+        phy_wifi_enable_set(1);
     (void)espw_osi_funcs._mutex_unlock(phy_lock);
 }
-void espw_phy_disable(void)
+/** @brief Release RF after its last radio has stopped. */
+static void phy_disable(uint8_t radio)
 {
     (void)espw_osi_funcs._mutex_lock(phy_lock);
-    phy_wifi_enable_set(0);
-    if (active) {
+    if (radio == 1u)
+        phy_wifi_enable_set(0);
+    uint8_t before = active;
+    active &= (uint8_t)~radio;
+    if (before && !active) {
         tiku_c6_trng_radio_set(TIKU_C6_TRNG_RADIO_BUSY);
         espw_timer_disarm(tracking_timer);
         phy_close_rf();
@@ -184,3 +207,68 @@ int espw_read_mac(uint8_t *mac, unsigned type)
         mac[5] = (uint8_t)(mac[5] + 2u);
     return ESP_OK;
 }
+
+void espw_phy_enable(void) { phy_enable(1u); }
+void espw_phy_disable(void) { phy_disable(1u); }
+#if (TIKU_DRV_BLE_ESP_ENABLE + 0)
+void espw_phy_bt_enable(void) { phy_enable(2u); }
+void espw_phy_bt_disable(void) { phy_disable(2u); }
+void espw_modem_bt_on(void)
+{
+    uint32_t state = native_irq_save();
+    if (!bt_clocked) {
+        bt_saved[0] = C6_REG(SYSCON + 4);
+        bt_saved[1] = C6_REG(LPCON + 4);
+        bt_saved[2] = C6_REG(LPCON + 0x18);
+        bt_clocked = 1;
+        field(LPCON + 0x18, 2u, 2u);
+        field(SYSCON + 4, BT_FIELDS, BT_FIELDS);
+        field(SYSCON + 0x14, CAL_CLOCKS, CAL_CLOCKS);
+        field(SYSCON + 0x10, BT_RESET, BT_RESET);
+        field(SYSCON + 0x10, BT_RESET, 0);
+        field(LPCON + 4, 0xffffu, (399u << 4) | 4u);
+        field(LPCON + 0x18, 8u, 8u);
+    }
+    native_irq_restore(state);
+}
+void espw_modem_bt_off(void)
+{
+    uint32_t state = native_irq_save();
+    if (bt_clocked) {
+        field(SYSCON + 4, BT_FIELDS, bt_saved[0]);
+        field(SYSCON + 0x14, CAL_CLOCKS, 0);
+        field(LPCON + 4, 0xffffu, bt_saved[1]);
+        field(LPCON + 0x18, 8u, bt_saved[2]);
+        bt_clocked = 0;
+    }
+    native_irq_restore(state);
+}
+uint32_t espw_modem_bt_lp_hz(void) { return 100000u; }
+void espw_btbb_enable(void) { bt_bb_v2_init_cmplx(1u); }
+void espw_btbb_disable(void) { }
+void espw_c6_bt_reset(uint8_t modules, uint8_t start)
+{
+#if ESPW_COEX
+    extern void coex_hw_timer_set(uint8_t, uint8_t, uint8_t, uint32_t, uint32_t);
+    extern void coex_hw_timer_enable(uint8_t);
+    extern void coex_hw_timer_disable(uint8_t);
+    if (modules == 5u) {
+        if (start) {
+            coex_hw_timer_set(4u, 2u, 15u, 0u, 5000u);
+            coex_hw_timer_enable(4u);
+        } else {
+            coex_hw_timer_disable(4u);
+        }
+    }
+#endif
+    if (modules == 5u && start) {
+        field(SYSCON + 0x10, (1u << 16) | (1u << 18), (1u << 16) | (1u << 18));
+        field(SYSCON + 0x10, (1u << 16) | (1u << 18), 0);
+    }
+}
+uint32_t espw_c6_revision(void)
+{
+    uint32_t version = C6_REG(0x600b0850u);
+    return ((version >> 22) & 3u) * 100u + ((version >> 18) & 15u);
+}
+#endif

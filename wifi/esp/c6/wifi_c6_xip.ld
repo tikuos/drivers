@@ -15,3 +15,7 @@
 *libcore.a:*(.text .text.* .rodata* .srodata*)
 *libphy.a:*(.text .text.* .rodata* .srodata*)
 KEEP(*(.xip.roots))
+*tiku_bt.o(.text .text.* .rodata* .srodata*)
+*libble_app.a:*(.text .text.* .rodata* .srodata* .iram1 .iram1.* .adv_fast_execute_code_iram1* .iram_sleep* .iram_btslp* .iram_single_sleep*)
+*libbtbb.a:*(.text .text.* .rodata* .srodata* .iram1 .iram1.*)
+*libcoexist.a:*(.text .text.* .rodata* .srodata* .iram1 .iram1.*)

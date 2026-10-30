@@ -1,12 +1,10 @@
 /*
- * Tiku Drivers - ESP32-C61 BLE controller library, the ABI this driver uses
+ * Tiku Drivers - ESP32-C5, C6 and C61 controller ABI bindings.
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
- * Hand-written from ESP-IDF 4d59230, the tree whose esp32c6-bt-lib commit
- * fetch.sh pins (the C61 shares the C6's controller glue): the tables the
- * controller takes before init, its config, the NPL object shapes, the
- * os_mempool API it imports, and the calls the driver makes.  The asserts
- * hold the layouts to what the library itself reads (checked in its code:
- * config version at 0 and magic at 112, ext magic at 44).
+ * ESP-IDF 4d59230 defines the controller, NPL and memory-pool tables.
+ * C6 includes the modem-reset callback and silicon revision field.
+ * RV32 assertions check each target's configuration and callback layout.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -50,6 +48,9 @@ typedef struct {
     int (*_ecc_gen_dh_key)(const uint8_t *remote_pub_key_x,
                            const uint8_t *remote_pub_key_y,
                            const uint8_t *local_priv_key, uint8_t *dhkey);
+#if defined(PLATFORM_ESP32C6)
+    void (*_esp_reset_modem)(uint8_t modules, uint8_t start);
+#endif
     uint32_t magic;
 } espb_ext_funcs_t;
 
@@ -63,8 +64,7 @@ typedef struct {
     void (*_coex_schm_status_bit_clear)(uint32_t type, uint32_t status);
 } espb_coex_funcs_t;
 
-/** @brief The controller's configuration, the C61's layout (IDF's
- *         esp_bt_controller_config_t without the C6's version_num). */
+/** @brief Controller configuration, including the C6 silicon revision when selected. */
 typedef struct {
     uint32_t config_version;
     uint16_t ble_ll_resolv_list_size;
@@ -107,6 +107,9 @@ typedef struct {
     uint8_t  cca_drop_mode;
     int8_t   cca_low_tx_pwr;
     uint8_t  main_xtal_freq;
+#if defined(PLATFORM_ESP32C6)
+    uint32_t version_num;
+#endif
     uint8_t  cpu_freq_mhz;
     uint8_t  ignore_wl_for_direct_adv;
     uint8_t  enable_pcl;
@@ -282,12 +285,21 @@ struct os_mbuf_pkthdr {
 
 /* Sizes and offsets the library reads, on the target (RV32). */
 #if defined(__riscv) && __riscv_xlen == 32
+#if defined(PLATFORM_ESP32C6)
+_Static_assert(sizeof(espb_ext_funcs_t) == 52, "ext");
+_Static_assert(offsetof(espb_ext_funcs_t, magic) == 48, "ext");
+_Static_assert(sizeof(espb_config_t) == 128, "config");
+_Static_assert(offsetof(espb_config_t, version_num) == 88, "config");
+_Static_assert(offsetof(espb_config_t, ptr_check_enabled) == 105, "config");
+_Static_assert(offsetof(espb_config_t, config_magic) == 120, "config");
+#else
 _Static_assert(sizeof(espb_ext_funcs_t) == 48, "ext");
 _Static_assert(offsetof(espb_ext_funcs_t, magic) == 44, "ext");
 _Static_assert(sizeof(espb_config_t) == 120, "config");
 _Static_assert(offsetof(espb_config_t, rtc_freq) == 24, "config");
 _Static_assert(offsetof(espb_config_t, ptr_check_enabled) == 97, "config");
 _Static_assert(offsetof(espb_config_t, config_magic) == 112, "config");
+#endif
 _Static_assert(sizeof(espb_npl_funcs_t) == 45 * 4, "npl");
 _Static_assert(offsetof(espb_npl_funcs_t, p_ble_npl_hw_enter_critical) == 160,
                "npl");

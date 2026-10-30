@@ -42,6 +42,9 @@ extern const tiku_drv_t tiku_drv_wifi_ipc;
 extern const tiku_drv_t tiku_drv_wifi_esp;
 #endif
 
+#if TIKU_DRV_BLE_IPC_ENABLE
+extern const tiku_drv_t tiku_drv_ble_ipc;
+#endif
 #if TIKU_DRV_BLE_ESP_ENABLE
 extern const tiku_drv_t tiku_drv_ble_esp;
 #endif
@@ -74,6 +77,9 @@ const tiku_drv_t *const tiku_drv_table[] = {
     &tiku_drv_wifi_esp,
 #endif
 
+#if TIKU_DRV_BLE_IPC_ENABLE
+    &tiku_drv_ble_ipc,
+#endif
 #if TIKU_DRV_BLE_ESP_ENABLE
     &tiku_drv_ble_esp,
 #endif

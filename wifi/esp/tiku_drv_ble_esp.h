@@ -25,6 +25,11 @@ extern const tiku_drv_t tiku_drv_ble_esp;
  */
 int tiku_drv_ble_esp_power(uint8_t on);
 
+#if TIKU_C6_BLE_SERVICE_ENABLE
+/** @brief Power the controller for the IPC owner without starting the local host. */
+int tiku_drv_ble_esp_remote_power(uint8_t on);
+#endif
+
 /** @brief What `bt status` shows of the controller. */
 typedef struct {
     uint8_t     up;

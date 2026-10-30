@@ -106,6 +106,16 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     heap_bytes = TIKU_DRV_ESP_COEX_HEAP_BYTES;
 #endif
     if (!core_heap_taken) {
+#if defined(PLATFORM_ESP32C6) && (TIKU_DRV_BLE_ESP_ENABLE + 0)
+        extern uint8_t __radio_reserve_start[], __radio_reserve_end[];
+        uint32_t capacity = (uint32_t)(__radio_reserve_end - __radio_reserve_start);
+        (void)req;
+        if (heap_bytes > capacity ||
+            tiku_arena_create_raw(&core_heap_arena, __radio_reserve_start, capacity) != TIKU_MEM_OK) {
+            TIKU_PRINTF("[esp] reserved SRAM cannot hold the %s heap\n", core_name(radio));
+            return -1;
+        }
+#else
         req.alignment = 8U;
         req.allocation_class = TIKU_MEM_TRANSIENT;
         if (tiku_mem_workspace_open(&core_heap_arena, heap_bytes, &req) !=
@@ -115,6 +125,7 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
                         core_name(radio));
             return -1;
         }
+#endif
         espw_heap_init(core_heap_arena.buf, core_heap_arena.capacity);
         core_heap_taken = 1U;
     }
@@ -159,7 +170,11 @@ void espw_core_down(uint8_t radio) {
 #endif
     if (ended && espw_heap_used() == 0U) {
         espw_heap_reset();
+#if defined(PLATFORM_ESP32C6) && (TIKU_DRV_BLE_ESP_ENABLE + 0)
+        (void)tiku_arena_destroy(&core_heap_arena);
+#else
         (void)tiku_mem_workspace_close(&core_heap_arena);
+#endif
         core_heap_taken = 0U;
     } else {
         TIKU_PRINTF("[esp] heap kept: %lu bytes still in use\n",

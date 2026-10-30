@@ -1,5 +1,5 @@
 /*
- * Tiku Drivers - ESP32-C5/C61 BLE controller lifecycle and HCI transport
+ * Tiku Drivers - ESP32-C5/C6/C61 BLE controller lifecycle and HCI transport
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  *
  * Espressif's controller runs over TikuOS workers, timers and memory pools.
@@ -24,6 +24,9 @@
 #endif
 #include <interfaces/bluetooth/tiku_bt.h>
 #include <interfaces/bluetooth/tiku_bt_transport.h>
+#if TIKU_C6_BLE_SERVICE_ENABLE
+extern int tiku_ble_service_local_allowed(void);
+#endif
 #include <tikukits/crypto/p256/tiku_kits_crypto_p256.h>
 
 #include "esp_ble.h"
@@ -67,6 +70,9 @@
 
 static uint8_t       espb_ready;        /* xip.bin is this build's */
 static uint8_t       espb_up;           /* enabled: HCI flows */
+#if defined(PLATFORM_ESP32C6)
+static uint8_t       espb_phy;
+#endif
 static tiku_thread_t *espb_task;        /* the controller's task */
 static tiku_waitq_t  espb_idle_wq;      /* woken as that task blocks */
 static espb_config_t espb_cfg;
@@ -214,6 +220,9 @@ static int espb_ecc_dh_key(const uint8_t *x, const uint8_t *y,
 
 static espb_ext_funcs_t espb_ext = {
     .ext_version = ESPB_EXT_VERSION,
+#if defined(PLATFORM_ESP32C6)
+    ._esp_reset_modem = espw_c6_bt_reset,
+#endif
     ._esp_intr_alloc = espb_intr_alloc,
     ._esp_intr_free = espb_intr_free,
     ._malloc = espw_malloc,
@@ -255,11 +264,9 @@ static espb_coex_funcs_t espb_coex = {
     ._coex_schm_status_bit_clear = espb_coex_clear,
 };
 
-/** @brief IDF's default controller configuration for the C61 (controller
- *         only, HCI in memory, BLE 5 features on), cut to what tikuOS's host
- *         uses: one link, a 23-byte ATT MTU, legacy advertising. */
+/** @brief Configure one connection, 255-byte ACL buffers and legacy advertising. */
 static void espb_config(espb_config_t *c) {
-#if !defined(PLATFORM_ESP32C5)
+#if !defined(PLATFORM_ESP32C5) && !defined(PLATFORM_ESP32C6)
     tiku_esp32c61_clock_t clk;
 
     tiku_cpu_esp32c61_clock_probe(&clk);
@@ -299,6 +306,10 @@ static void espb_config(espb_config_t *c) {
 #if defined(PLATFORM_ESP32C5)
     c->main_xtal_freq = (uint8_t)((TIKU_C5_REG_READ(0x60096110u) >> 24) & 127u);
     c->cpu_freq_mhz = (uint8_t)(tiku_cpu_mclk_hz() / 1000000UL);
+#elif defined(PLATFORM_ESP32C6)
+    c->main_xtal_freq = 40U;
+    c->cpu_freq_mhz = (uint8_t)(tiku_cpu_mclk_hz() / 1000000UL);
+    c->version_num = espw_c6_revision();
 #else
     c->main_xtal_freq = 40U;
     c->cpu_freq_mhz = (uint8_t)(clk.cpu_hz / 1000000UL);
@@ -467,6 +478,11 @@ static void espb_settle(void) {
 }
 
 static int espb_send(const uint8_t *pkt, uint16_t len) {
+#if TIKU_C6_BLE_SERVICE_ENABLE
+    if (!tiku_ble_service_local_allowed()) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+#endif
     if (!espb_up) {
         return TIKU_DRV_ERR_NOT_PRESENT;
     }
@@ -515,6 +531,11 @@ static int espb_recv(uint8_t *out, uint16_t out_max) {
     uint8_t lb[2];
     uint32_t n;
     int rc;
+#if TIKU_C6_BLE_SERVICE_ENABLE
+    if (!tiku_ble_service_local_allowed()) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+#endif
 
     if (out == NULL || out_max < 2U) {
         return TIKU_DRV_ERR_INVALID;
@@ -623,9 +644,17 @@ static void espb_teardown(int stage) {
         coex_disable();
 #endif
         espw_btbb_disable();
+#if !defined(PLATFORM_ESP32C6)
         espw_phy_bt_disable();
+#endif
         espw_arch_sleep_hold(0);
     }
+#if defined(PLATFORM_ESP32C6)
+    if (espb_phy) {
+        espw_phy_bt_disable();
+        espb_phy = 0;
+    }
+#endif
     if (stage >= STAGE_MSYS) {
         r_esp_ble_msys_deinit();        /* HCI callbacks stay: they drop */
     }
@@ -658,7 +687,7 @@ static int espb_fail(int stage, const char *what, int rc) {
     return TIKU_DRV_ERR_INIT;
 }
 
-static int espb_power_up(void) {
+static int espb_power_up(uint8_t host) {
     espb_npl_counts_t n;
     uint8_t mac[6], le[6];
     int rc;
@@ -701,6 +730,11 @@ static int espb_power_up(void) {
         return espb_fail(STAGE_MODEM, "baseband funcs", rc);
     }
 
+#if defined(PLATFORM_ESP32C6)
+    /* Controller initialization fills its random pool through the RF entropy source. */
+    espw_phy_bt_enable();
+    espb_phy = 1;
+#endif
     rc = r_ble_controller_init(&espb_cfg);
     if (rc != 0) {
         return espb_fail(STAGE_MODEM, "controller init", rc);
@@ -731,7 +765,9 @@ static int espb_power_up(void) {
     }
 
     /* Enable: the PHY for BLE, the baseband, the flash-only timing. */
+#if !defined(PLATFORM_ESP32C6)
     espw_phy_bt_enable();
+#endif
     espw_arch_sleep_hold(1);
     espw_btbb_enable();
 #if ESPW_COEX
@@ -755,18 +791,28 @@ static int espb_power_up(void) {
                 n.evt_count, n.evtq_count, n.co_count, n.sem_count,
                 n.mutex_count);
     (void)tiku_bt_register_transport(&espb_transport);
+    if (!host) {
+        return TIKU_DRV_OK;
+    }
     rc = tiku_bt_init();
     espb_note_heap();
     if (rc != TIKU_DRV_OK) {
         ESPB_PRINTF("host stack: %d\n", rc);
+#if defined(PLATFORM_ESP32C6)
+        tiku_bt_shutdown();
+        espb_teardown(STAGE_ENABLED);
+        return rc;
+#endif
     }
     return TIKU_DRV_OK;
 }
 
-static int espb_power_down(void) {
+static int espb_power_down(uint8_t host) {
     espw_heap_stats_t st;
 
-    tiku_bt_shutdown();
+    if (host) {
+        tiku_bt_shutdown();
+    }
     espw_heap_stats(&st);
     espb_teardown(STAGE_ENABLED);
     ESPB_PRINTF("down: the heap peaked at %lu of %lu bytes, %lu refused, "
@@ -777,14 +823,31 @@ static int espb_power_down(void) {
 }
 
 int tiku_drv_ble_esp_power(uint8_t on) {
+#if TIKU_C6_BLE_SERVICE_ENABLE
+    if (!tiku_ble_service_local_allowed()) {
+        return TIKU_DRV_ERR_TIMEOUT;
+    }
+#endif
     if (!espb_ready) {
         return TIKU_DRV_ERR_NOT_PRESENT;
     }
     if ((on != 0U) == (espb_up != 0U)) {
         return TIKU_DRV_OK;
     }
-    return on ? espb_power_up() : espb_power_down();
+    return on ? espb_power_up(1) : espb_power_down(1);
 }
+
+#if TIKU_C6_BLE_SERVICE_ENABLE
+int tiku_drv_ble_esp_remote_power(uint8_t on) {
+    if (!espb_ready) {
+        return TIKU_DRV_ERR_NOT_PRESENT;
+    }
+    if ((on != 0U) == (espb_up != 0U)) {
+        return TIKU_DRV_OK;
+    }
+    return on ? espb_power_up(0) : espb_power_down(0);
+}
+#endif
 
 /* The host stack's switch (tiku_bt_power(), `bt on/off`). */
 int tiku_bt_controller_power(uint8_t on) {
@@ -827,7 +890,7 @@ static int espb_init(void) {
 
 static int espb_deinit(void) {
     if (espb_up) {
-        (void)espb_power_down();
+        (void)espb_power_down(1);
     }
     espb_ready = 0U;
     return TIKU_DRV_OK;

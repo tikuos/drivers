@@ -50,4 +50,8 @@ void espw_c6_fatal(const char *message) __attribute__((noreturn));
 void espw_c6_radio_release(void);
 /** @brief Return nonzero while the C6 PHY owns the RF entropy source. */
 int espw_c6_phy_active(void);
+/** @brief Read the eFuse silicon revision as major times 100 plus minor. */
+uint32_t espw_c6_revision(void);
+/** @brief Pulse the controller-requested modem reset mask. */
+void espw_c6_bt_reset(uint8_t modules, uint8_t start);
 #endif

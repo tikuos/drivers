@@ -1,0 +1,19 @@
+{
+  "sdk": "4d59230ddff16327812782151ef0afef202dc6d7",
+  "target": "esp32c6",
+  "license": "Apache-2.0",
+  "files": [
+    {
+      "path": "vendor/libble_app.a",
+      "bytes": 1825738,
+      "sha256": "67e024c95d7098fb45be178f217dd4cd33406400b1de4f60a2ade08770b8a9b0",
+      "url": "https://raw.githubusercontent.com/espressif/esp32c6-bt-lib/a00f2d0a19c54b9ca31358754fbb8b9a08cbb92c/esp32c6/libble_app.a"
+    },
+    {
+      "path": "vendor/NOTICE-ble",
+      "bytes": 320,
+      "sha256": "ebd002217a1a76e3cce23cd89d0916477da6c7907a6a46c8a7f1fb209e3cb333",
+      "url": "https://raw.githubusercontent.com/espressif/esp32c6-bt-lib/a00f2d0a19c54b9ca31358754fbb8b9a08cbb92c/NOTICE"
+    }
+  ]
+}

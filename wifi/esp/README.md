@@ -1,6 +1,6 @@
 # ESP32-C61 Wi-Fi and BLE (Espressif radio libraries)
 
-For the native C6 station adapter and its qualification limits, see
+For the native C6 Wi-Fi/BLE adapters and their qualification limits, see
 [`c6/README.md`](c6/README.md).
 
 For the C5 PHY and opt-in native Wi-Fi, BLE and SDR adapters, see
