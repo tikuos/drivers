@@ -90,15 +90,19 @@ typedef enum {
 static const uint8_t oui_rsn[3] = { 0x00, 0x0F, 0xAC };    /* IEEE 802.11 */
 static const uint8_t oui_wpa[3] = { 0x00, 0x50, 0xF2 };    /* WPA, vendor */
 
-/* What the association asks for: CCMP both ways, PSK, no MFP.  The stack
- * keeps the pointer, so this is never cleared. */
-static uint8_t wpa_assoc_ie[] = {
+/* Association and handshake message 2 request CCMP both ways, PSK, no MFP. */
+static const uint8_t wpa_assoc_ie[] = {
     EID_RSN, 20, 1, 0,
     0x00, 0x0F, 0xAC, 4,                /* group: CCMP */
     1, 0, 0x00, 0x0F, 0xAC, 4,          /* pairwise: CCMP */
     1, 0, 0x00, 0x0F, 0xAC, 2,          /* AKM: PSK */
     0, 0                                /* capabilities */
 };
+/* The library retains this buffer and writes its two-byte length prefix. */
+static struct {
+    uint16_t length;
+    uint8_t ie[sizeof wpa_assoc_ie];
+} wpa_assoc_buffer;
 
 /* A group key as the AP gave it: key, index, and its receive counter. */
 typedef struct {
@@ -474,8 +478,8 @@ static void wpa_install_gtk(void) {
 /* The handshakes                                                            */
 /*---------------------------------------------------------------------------*/
 
-/** @brief Message 1: the AP's nonce.  Answer with ours and our RSN
- *         element, the MIC under a PTK that message 3 will prove. */
+/** @brief Answer message 1 with the station nonce, RSN element and a MIC
+ *         computed with the PTK awaiting message 3 validation. */
 static void wpa_msg1(const uint8_t *k) {
     if (s.renew) {
         if (tiku_trng_arch_read_bytes(s.snonce, NONCE_LEN) != 0) {
@@ -639,10 +643,13 @@ static int wpa_begin(const uint8_t *bssid) {
     memcpy(s.pmk, pmk, PMK_LEN);
     memcpy(s.bssid, bssid, ADDR_LEN);
     (void)esp_wifi_get_macaddr_internal(WIFI_IF_STA, s.own);
+    memcpy(wpa_assoc_buffer.ie, wpa_assoc_ie, sizeof wpa_assoc_ie);
+    if (esp_wifi_set_appie_internal(WIFI_APPIE_RSN,
+            (uint8_t *)&wpa_assoc_buffer, sizeof wpa_assoc_ie, 1U) != 0) {
+        return -1;
+    }
     s.renew = 1U;
     s.state = WPA_ASSOCIATING;
-    (void)esp_wifi_set_appie_internal(WIFI_APPIE_RSN, wpa_assoc_ie,
-                                      sizeof wpa_assoc_ie, 1U);
     return 0;
 }
 
