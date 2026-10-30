@@ -34,6 +34,10 @@ extern const tiku_drv_t tiku_drv_phy_c5;
 extern const tiku_drv_t tiku_drv_wifi_cyw43;
 #endif
 
+#if TIKU_DRV_WIFI_IPC_ENABLE
+extern const tiku_drv_t tiku_drv_wifi_ipc;
+#endif
+
 #if TIKU_DRV_WIFI_ESP_ENABLE
 extern const tiku_drv_t tiku_drv_wifi_esp;
 #endif
@@ -60,6 +64,10 @@ const tiku_drv_t *const tiku_drv_table[] = {
 #endif
 #if TIKU_DRV_WIFI_CYW43_ENABLE
     &tiku_drv_wifi_cyw43,
+#endif
+
+#if TIKU_DRV_WIFI_IPC_ENABLE
+    &tiku_drv_wifi_ipc,
 #endif
 
 #if TIKU_DRV_WIFI_ESP_ENABLE

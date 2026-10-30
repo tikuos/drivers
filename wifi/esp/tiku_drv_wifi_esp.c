@@ -19,6 +19,13 @@
 #include <kernel/threads/tiku_thread.h>
 #include <kernel/timers/tiku_clock.h>
 #include "esp_arch.h"
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+#include <services/ipc/tiku_ipc_radio.h>
+#include <interfaces/wireless/tiku_wireless_ipc.h>
+#define RADIO_OWNER_CHECK() do { if(!tiku_radio_local_allowed())return TIKU_DRV_ERR_TIMEOUT; } while(0)
+#else
+#define RADIO_OWNER_CHECK() do { } while(0)
+#endif
 #include <tikukits/crypto/pbkdf2/tiku_kits_crypto_pbkdf2.h>
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
@@ -125,6 +132,17 @@ static tiku_wireless_rx_t espw_rx_cb;
 static void              *espw_rx_ctx;
 
 TIKU_PROCESS(espw_runner, "wifi-esp");
+
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+/* The worker owns these inputs until DONE, including after cancellation. */
+static struct {
+    wifi_config_t config;
+    uint8_t pmk[ESPW_PMK_LEN];
+    uint8_t active;
+    uint8_t cancelled;
+} espw_pmk_job;
+TIKU_THREAD(espw_pmk_worker, 2048);
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* Events from the libraries                                                 */
@@ -281,6 +299,10 @@ static void espw_join_failed(uint32_t why, const char *what) {
 static void espw_leave(void) {
     uint8_t was = espw_link;
 
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+    espw_pmk_job.cancelled = 1U;
+#endif
+
     espw_link = TIKU_WIRELESS_LINK_IDLE;
     espw_tries = 0U;
     espw_wpa_set_pmk(NULL);
@@ -297,6 +319,49 @@ static void espw_leave(void) {
     }
 }
 
+/** @brief Apply a station configuration after its PMK is ready. */
+static void espw_join_configure(wifi_config_t *cfg) {
+    esp_err_t rc = esp_wifi_set_config(WIFI_IF_STA, cfg);
+    memset(cfg, 0, sizeof *cfg);
+    if (rc == ESP_OK) {
+        rc = esp_wifi_disable_pmf_config(WIFI_IF_STA);
+    }
+    if (rc == ESP_OK) {
+        rc = esp_wifi_connect_internal();
+    }
+    if (rc != ESP_OK) {
+        espw_join_failed((uint32_t)rc, "the stack refused it");
+    }
+}
+
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+/** @brief Derive the PMK on a preemptible worker without radio calls. */
+static void espw_pmk_derive(void *arg) {
+    (void)arg;
+    (void)tiku_kits_crypto_pbkdf2_hmac_sha1(
+        espw_pmk_job.config.sta.password,
+        strlen((const char *)espw_pmk_job.config.sta.password),
+        espw_pmk_job.config.sta.ssid,
+        strnlen((const char *)espw_pmk_job.config.sta.ssid, 32U),
+        ESPW_PSK_ROUNDS, espw_pmk_job.pmk, sizeof espw_pmk_job.pmk);
+}
+
+/** @brief Reap a completed derivation; cancelled work cannot join. */
+static void espw_pmk_collect(void) {
+    if (!espw_pmk_job.active || !tiku_thread_is_done(&espw_pmk_worker)) {
+        return;
+    }
+    (void)tiku_thread_forget(&espw_pmk_worker);
+    if (!espw_pmk_job.cancelled && espw_up &&
+        espw_link == TIKU_WIRELESS_LINK_CONNECTING) {
+        espw_wpa_set_pmk(espw_pmk_job.pmk);
+        espw_join_configure(&espw_pmk_job.config);
+    }
+    tiku_radio_wipe(&espw_pmk_job, sizeof espw_pmk_job);
+    tiku_radio_wipe(espw_pmk_worker_stack, sizeof espw_pmk_worker_stack);
+}
+#endif
+
 /**
  * @brief Configure the station for the network asked for and start joining,
  *        leaving the one joined first.  The passphrase becomes its PMK here
@@ -304,9 +369,10 @@ static void espw_leave(void) {
  */
 static void espw_join_begin(void) {
     size_t slen, plen = strlen(espw_want_psk);
+#if !TIKU_C6_RADIO_SERVICE_ENABLE
     uint8_t pmk[ESPW_PMK_LEN];
+#endif
     wifi_config_t cfg;
-    esp_err_t rc;
 
     if (!espw_want || !espw_up) {
         espw_want = 0U;
@@ -329,29 +395,34 @@ static void espw_join_begin(void) {
     cfg.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     cfg.sta.features = WIFI_STA_NO_WPA3_COMPAT;
     if (plen != 0U) {
+        memcpy(cfg.sta.password, espw_want_psk, plen);
+        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+        espw_pmk_job.config = cfg;
+        espw_pmk_job.active = 1U;
+        espw_pmk_job.cancelled = 0U;
+        tiku_radio_wipe(espw_want_psk, sizeof espw_want_psk);
+        tiku_radio_wipe(&cfg, sizeof cfg);
+        if (tiku_thread_start(&espw_pmk_worker, espw_pmk_derive, NULL) != 0) {
+            tiku_radio_wipe(&espw_pmk_job, sizeof espw_pmk_job);
+            espw_join_failed((uint32_t)ESP_ERR_NO_MEM, "no key worker slot");
+        } else if (tiku_thread_await(&espw_pmk_worker, &espw_runner)) {
+            tiku_process_poll(&espw_runner);
+        }
+        return;
+#else
         (void)tiku_kits_crypto_pbkdf2_hmac_sha1(
             (const uint8_t *)espw_want_psk, plen, (const uint8_t *)espw_ssid,
             slen, ESPW_PSK_ROUNDS, pmk, sizeof pmk);
         espw_wpa_set_pmk(pmk);
         memset(pmk, 0, sizeof pmk);
-        memcpy(cfg.sta.password, espw_want_psk, plen);
-        cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+#endif
     } else {
         espw_wpa_set_pmk(NULL);
         cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
     }
     memset(espw_want_psk, 0, sizeof espw_want_psk);
-    rc = esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    memset(&cfg, 0, sizeof cfg);
-    if (rc == ESP_OK) {
-        rc = esp_wifi_disable_pmf_config(WIFI_IF_STA);
-    }
-    if (rc == ESP_OK) {
-        rc = esp_wifi_connect_internal();
-    }
-    if (rc != ESP_OK) {
-        espw_join_failed((uint32_t)rc, "the stack refused it");
-    }
+    espw_join_configure(&cfg);
 }
 
 /** @brief The station has joined: the handshake (if any) is done. */
@@ -473,6 +544,9 @@ TIKU_PROCESS_THREAD(espw_runner, ev, data)
     TIKU_PROCESS_BEGIN();
     for (;;) {
         TIKU_PROCESS_WAIT_EVENT();
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+        espw_pmk_collect();
+#endif
         if (ev == TIKU_WIRELESS_EVT_SCAN_START) {
             espw_scan_begin();
         } else if (ev == ESPW_EV_SCAN_DONE && espw_scanning) {
@@ -634,6 +708,7 @@ static int espw_power_down(void) {
 /*---------------------------------------------------------------------------*/
 
 int tiku_wireless_power(uint8_t on) {
+    RADIO_OWNER_CHECK();
     if (!espw_ready) {
         return TIKU_DRV_ERR_NOT_PRESENT;
     }
@@ -671,6 +746,7 @@ int tiku_wireless_status(tiku_wireless_status_t *out) {
 }
 
 int tiku_wireless_scan_start(void) {
+    RADIO_OWNER_CHECK();
     if (!espw_up) {
         return TIKU_DRV_ERR_INVALID;
     }
@@ -695,6 +771,7 @@ uint8_t tiku_wireless_scan_results(tiku_wireless_ap_t *out,
 /* WPA2-PSK, or an open network for an empty passphrase; WPA3 not yet. */
 int tiku_wireless_connect_auth(const char *ssid, const char *psk,
                                tiku_wireless_auth_t auth) {
+    RADIO_OWNER_CHECK();
     size_t slen, plen;
 
     if (!espw_up || ssid == NULL || psk == NULL ||
@@ -706,7 +783,11 @@ int tiku_wireless_connect_auth(const char *ssid, const char *psk,
     if (slen == 0U || slen > 32U || (plen != 0U && (plen < 8U || plen > 63U))) {
         return TIKU_DRV_ERR_INVALID;
     }
-    if (espw_want || espw_scanning ||
+    if (
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+        espw_pmk_job.active ||
+#endif
+        espw_want || espw_scanning ||
         espw_link == TIKU_WIRELESS_LINK_CONNECTING) {
         return TIKU_DRV_ERR_TIMEOUT;
     }
@@ -726,9 +807,13 @@ int tiku_wireless_connect(const char *ssid, const char *psk) {
 }
 
 int tiku_wireless_disconnect(void) {
+    RADIO_OWNER_CHECK();
     if (!espw_up) {
         return TIKU_DRV_ERR_INVALID;
     }
+#if TIKU_C6_RADIO_SERVICE_ENABLE
+    espw_pmk_job.cancelled = 1U;
+#endif
     espw_want = 0U;                     /* a join not yet begun is dropped */
     memset(espw_want_psk, 0, sizeof espw_want_psk);
     return tiku_process_post(&espw_runner, TIKU_WIRELESS_EVT_DISCONNECT,
@@ -737,6 +822,7 @@ int tiku_wireless_disconnect(void) {
 
 /* Nothing is kept across boots: forgetting is leaving. */
 int tiku_wireless_forget(void) {
+    RADIO_OWNER_CHECK();
     if (espw_up) {
         (void)tiku_wireless_disconnect();
     }
@@ -753,6 +839,7 @@ int tiku_wireless_saved_profile(tiku_wireless_saved_profile_t *out) {
 }
 
 int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
+    RADIO_OWNER_CHECK();
     int rc;
 
     if (frame == NULL || len < ESPW_ETH_HDR || len > ESPW_ETH_MAX ||
@@ -767,6 +854,7 @@ int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
 }
 
 int tiku_wireless_set_rx(tiku_wireless_rx_t cb, void *ctx) {
+    RADIO_OWNER_CHECK();
     if (!espw_ready) {
         return TIKU_DRV_ERR_NOT_PRESENT;
     }
