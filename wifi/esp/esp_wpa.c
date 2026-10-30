@@ -111,8 +111,14 @@ typedef struct {
     uint8_t rsc[GTK_RSC_LEN];
 } wpa_gtk_t;
 
-/* One station, one handshake: called only from the libraries' task. */
-static struct {
+/* One station, one handshake: called only from the libraries' task.  The
+ * keys lead a word-aligned struct: the radio library copies an unaligned key
+ * into an OSI allocation and releases it with libc free(), which does not
+ * own that block. */
+typedef struct __attribute__((aligned(4))) {
+    uint8_t tptk[PTK_LEN];              /* from message 1, until 3 proves it */
+    uint8_t ptk[PTK_LEN];
+    wpa_gtk_t gtk;                      /* the one in use, or to go in */
     uint8_t state;
     uint8_t renew;                      /* a new SNonce at the next message 1 */
     uint8_t replay_set;
@@ -122,10 +128,11 @@ static struct {
     uint8_t pmk[PMK_LEN];
     uint8_t anonce[NONCE_LEN];
     uint8_t snonce[NONCE_LEN];
-    uint8_t tptk[PTK_LEN];              /* from message 1, until 3 proves it */
-    uint8_t ptk[PTK_LEN];
-    wpa_gtk_t gtk;                      /* the one in use, or to go in */
-} s;
+} wpa_sta_t;
+_Static_assert((offsetof(wpa_sta_t, ptk) + PTK_TK) % 4U == 0U &&
+               (offsetof(wpa_sta_t, gtk) + offsetof(wpa_gtk_t, key)) % 4U == 0U,
+               "keys word-aligned");
+static wpa_sta_t s;
 
 static uint8_t wpa_pmk[PMK_LEN];        /* the driver's, for the next join */
 static uint8_t wpa_pmk_set;
