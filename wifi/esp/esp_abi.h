@@ -628,7 +628,8 @@ typedef struct {
         bool capable;
         bool required;
     } pmf_cfg;
-    uint32_t features;              /* WIFI_STA_* bits */
+    uint16_t features;              /* WIFI_STA_* bits at byte 130 */
+    uint32_t reserved_features;
     uint8_t  rest[48];
 } wifi_sta_config_t;
 
@@ -671,7 +672,7 @@ _Static_assert(offsetof(wifi_sta_config_t, scan_method) == 96, "sta");
 _Static_assert(offsetof(wifi_sta_config_t, listen_interval) == 108, "sta");
 _Static_assert(offsetof(wifi_sta_config_t, threshold) == 116, "sta");
 _Static_assert(offsetof(wifi_sta_config_t, pmf_cfg) == 128, "sta");
-_Static_assert(offsetof(wifi_sta_config_t, features) == 132, "sta");
+_Static_assert(offsetof(wifi_sta_config_t, features) == 130, "sta");
 _Static_assert(sizeof(wifi_event_sta_connected_t) == 48, "connected size");
 _Static_assert(offsetof(wifi_event_sta_connected_t, authmode) == 40, "conn");
 _Static_assert(sizeof(wifi_event_sta_disconnected_t) == 41, "disc size");
