@@ -608,8 +608,7 @@ _Static_assert(offsetof(wpa_funcs_t, wpa_sta_rx_mgmt) == 84, "wpa");
 int esp_wifi_register_wpa_cb_internal(wpa_funcs_t *cb);
 int esp_wifi_unregister_wpa_cb_internal(void);
 
-/** @brief The station's configuration: the fields the driver sets, the
- *         rest (PMF, SAE, HE, retry details) left zero. */
+/** @brief Native station configuration, including PMF and SAE method selection. */
 typedef struct {
     uint8_t  ssid[32];
     uint8_t  password[64];
@@ -630,15 +629,37 @@ typedef struct {
     } pmf_cfg;
     uint16_t features;              /* WIFI_STA_* bits at byte 130 */
     uint32_t reserved_features;
-    uint8_t  rest[48];
+    uint32_t sae_pwe_h2e, sae_pk_mode;
+    uint8_t  rest[40];
 } wifi_sta_config_t;
 
 #define WIFI_ALL_CHANNEL_SCAN       1U      /* scan_method: every channel */
 #define WIFI_CONNECT_AP_BY_SIGNAL   0U      /* sort_method: strongest first */
 #define WIFI_STA_NO_WPA3_COMPAT     (1U << 6)   /* no RSN override elements */
+#define WPA3_SAE_PWE_HASH_TO_ELEMENT 2U
+#define WPA3_SAE_PK_MODE_DISABLED    2U
+
+/** @brief Native IGTK descriptor; BIP-CMAC-128 occupies the first 16 key bytes. */
+typedef struct { uint8_t keyid[2], pn[6], igtk[32]; } wifi_wpa_igtk_t;
+int esp_wifi_set_igtk_internal(uint8_t if_index, const wifi_wpa_igtk_t *igtk);
+void esp_wifi_deauthenticate_internal(uint8_t reason);
 
 typedef union {
     wifi_sta_config_t sta;
+    struct {
+        uint8_t ssid[32], password[64], ssid_len, channel;
+        uint32_t authmode;
+        uint8_t ssid_hidden, max_connection;
+        uint16_t beacon_interval;
+        uint8_t csa_count, dtim_period;
+        uint32_t pairwise_cipher;
+        uint8_t ftm_responder;
+        struct { bool capable, required; } pmf_cfg;
+        uint32_t sae_pwe_h2e;
+        uint8_t features;
+        struct { uint16_t period; bool protected_keep_alive; } idle;
+        uint16_t gtk_rekey_interval;
+    } ap;
     uint8_t           raw[184];
 } wifi_config_t;
 
@@ -646,6 +667,7 @@ typedef union {
 #define WIFI_AUTH_WPA_PSK           2U
 #define WIFI_AUTH_WPA2_PSK          3U
 #define WIFI_AUTH_WPA_WPA2_PSK      4U
+#define WIFI_AUTH_WPA3_PSK          6U
 #define WIFI_AUTH_WPA2_WPA3_PSK     7U
 
 typedef struct {
@@ -667,6 +689,13 @@ typedef struct {
 
 #if defined(__riscv) && __riscv_xlen == 32
 _Static_assert(sizeof(wifi_config_t) == 184, "station config size");
+_Static_assert(offsetof(wifi_config_t, ap.authmode) == 100, "AP auth offset");
+_Static_assert(offsetof(wifi_config_t, ap.pairwise_cipher) == 112, "AP cipher offset");
+_Static_assert(offsetof(wifi_config_t, ap.pmf_cfg) == 117, "AP PMF offset");
+_Static_assert(offsetof(wifi_config_t, ap.sae_pwe_h2e) == 120, "AP SAE method offset");
+_Static_assert(offsetof(wifi_config_t, ap.gtk_rekey_interval) == 130, "AP rekey offset");
+_Static_assert(sizeof(wifi_wpa_igtk_t) == 40, "IGTK descriptor size");
+_Static_assert(offsetof(wifi_sta_config_t, sae_pwe_h2e) == 136, "station SAE method offset");
 _Static_assert(offsetof(wifi_sta_config_t, password) == 32, "sta");
 _Static_assert(offsetof(wifi_sta_config_t, scan_method) == 96, "sta");
 _Static_assert(offsetof(wifi_sta_config_t, listen_interval) == 108, "sta");
@@ -679,9 +708,7 @@ _Static_assert(sizeof(wifi_event_sta_disconnected_t) == 41, "disc size");
 _Static_assert(offsetof(wifi_event_sta_disconnected_t, reason) == 39, "disc");
 #endif
 
-/** @brief libnet80211: configure, join and leave (IDF's esp_wifi_connect
- *         and _disconnect wrap the two internal calls).  PMF is on unless
- *         turned off after each configure: this supplicant does no BIP. */
+/** @brief Native configuration, connection and PMF policy entry points. */
 esp_err_t esp_wifi_set_config(wifi_interface_t interface, wifi_config_t *conf);
 esp_err_t esp_wifi_disable_pmf_config(wifi_interface_t interface);
 esp_err_t esp_wifi_connect_internal(void);
@@ -697,6 +724,7 @@ esp_err_t esp_wifi_sta_get_rssi(int *rssi);
 #define WIFI_APPIE_RSN              4U
 #define NONE_AUTH                   0x01U   /* the profile's auth mode */
 #define WPA2_AUTH_PSK               0x05U
+#define WPA3_AUTH_PSK               0x09U
 #define WIFI_WPA_ALG_TKIP           2
 #define WIFI_WPA_ALG_CCMP           3
 #define KEY_FLAG_RX                 (1 << 2)

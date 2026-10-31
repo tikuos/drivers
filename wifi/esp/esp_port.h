@@ -183,6 +183,10 @@ void espw_wpa_set_pmk(const uint8_t *pmk);
 
 /** @brief Fill the crypto table esp_wifi_init_internal() takes. */
 void espw_crypto_table(wpa_crypto_funcs_t *t);
+/** @brief Compute RFC 4493 AES-128-CMAC; return zero or -1 for invalid pointers. */
+int espw_cmac(const uint8_t *key, const uint8_t *data, size_t len, uint8_t *mic);
+/** @brief Derive the SAE CCMP PTK using the SHA-256 PRF with a 384-bit output. */
+void espw_ptk_sha256(const uint8_t pmk[32], const uint8_t data[76], uint8_t ptk[48]);
 
 /* tiku_drv_wifi_esp.c -----------------------------------------------------*/
 

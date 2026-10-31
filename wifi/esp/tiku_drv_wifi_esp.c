@@ -30,6 +30,19 @@
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
 #include "esp_port.h"
+#if TIKU_ESP_SAE_ENABLE
+#include "esp_sae.h"
+#endif
+#if TIKU_WIRELESS_AP_ENABLE
+#include "esp_ap.h"
+#include <interfaces/wireless/tiku_wireless_ap.h>
+#include <kernel/timers/tiku_timer.h>
+static tiku_wireless_ap_status_t espw_ap;
+static uint8_t espw_ap_mode, espw_dual, espw_ap_mac[6];
+static tiku_wireless_rx_if_t espw_rx_if_cb;
+static struct tiku_timer espw_ap_timer;
+static void espw_ap_configure(wifi_config_t *cfg, const uint8_t *pmk);
+#endif
 
 /* The runner's own events, posted from the stack's task: a scan finished,
  * the station joined, the station left (data: the reason), frames came. */
@@ -103,6 +116,7 @@ static uint32_t          espw_scan_ticks;
  * only until its PMK is derived. */
 static char              espw_want_ssid[33];
 static char              espw_want_psk[64];
+static tiku_wireless_auth_t espw_want_auth;
 static uint8_t           espw_want;
 
 /* The network joined, or being joined, and how that stands. */
@@ -121,6 +135,7 @@ typedef struct {
     void    *buf;
     void    *eb;
     uint16_t len;
+    uint8_t interface;
 } espw_rx_slot_t;
 
 static espw_rx_slot_t     espw_rxq[ESPW_RX_SLOTS];
@@ -133,13 +148,25 @@ static void              *espw_rx_ctx;
 
 TIKU_PROCESS(espw_runner, "wifi-esp");
 
-#if TIKU_C6_RADIO_SERVICE_ENABLE
+#define ESPW_CREDENTIAL_WORKER (TIKU_C6_RADIO_SERVICE_ENABLE || TIKU_ESP_SAE_ENABLE)
+#if ESPW_CREDENTIAL_WORKER
+/** @brief Erase credential buffers through volatile stores. */
+static void espw_key_wipe(void *data, size_t size)
+{
+    volatile uint8_t *p = data;
+    while (size--) *p++ = 0;
+}
 /* The worker owns these inputs until DONE, including after cancellation. */
 static struct {
     wifi_config_t config;
     uint8_t pmk[ESPW_PMK_LEN];
     uint8_t active;
     uint8_t cancelled;
+    uint8_t access_point;
+#if TIKU_ESP_SAE_ENABLE
+    void *pt;
+    uint32_t *stack;
+#endif
 } espw_pmk_job;
 TIKU_THREAD(espw_pmk_worker, 2048);
 #endif
@@ -169,6 +196,14 @@ void espw_event(const char *base, int32_t id, const void *data, size_t len) {
     case WIFI_EVENT_STA_STOP:
         ESPW_PRINTF("station stopped\n");
         break;
+#if TIKU_WIRELESS_AP_ENABLE
+    case 14: /* AP station connected. */
+        espw_ap.clients = espw_ap_clients();
+        break;
+    case 15: /* AP station disconnected. */
+        espw_ap.clients = espw_ap_clients();
+        break;
+#endif
     case WIFI_EVENT_STA_CONNECTED:
         if (data != NULL) {
             const wifi_event_sta_connected_t *c = data;
@@ -299,8 +334,8 @@ static void espw_join_failed(uint32_t why, const char *what) {
 static void espw_leave(void) {
     uint8_t was = espw_link;
 
-#if TIKU_C6_RADIO_SERVICE_ENABLE
-    espw_pmk_job.cancelled = 1U;
+#if ESPW_CREDENTIAL_WORKER
+    if (!espw_pmk_job.access_point) espw_pmk_job.cancelled = 1U;
 #endif
 
     espw_link = TIKU_WIRELESS_LINK_IDLE;
@@ -319,13 +354,13 @@ static void espw_leave(void) {
     }
 }
 
-/** @brief Apply a station configuration after its PMK is ready. */
+/** @brief Apply a station configuration after credential derivation finishes. */
 static void espw_join_configure(wifi_config_t *cfg) {
     esp_err_t rc = esp_wifi_set_config(WIFI_IF_STA, cfg);
-    memset(cfg, 0, sizeof *cfg);
-    if (rc == ESP_OK) {
+    if (rc == ESP_OK && !cfg->sta.pmf_cfg.required) {
         rc = esp_wifi_disable_pmf_config(WIFI_IF_STA);
     }
+    memset(cfg, 0, sizeof *cfg);
     if (rc == ESP_OK) {
         rc = esp_wifi_connect_internal();
     }
@@ -334,10 +369,19 @@ static void espw_join_configure(wifi_config_t *cfg) {
     }
 }
 
-#if TIKU_C6_RADIO_SERVICE_ENABLE
-/** @brief Derive the PMK on a preemptible worker without radio calls. */
+#if ESPW_CREDENTIAL_WORKER
+/** @brief Derive SAE elements and vendor PSKs on a preemptible credential worker. */
 static void espw_pmk_derive(void *arg) {
     (void)arg;
+#if TIKU_ESP_SAE_ENABLE
+    if (espw_pmk_job.stack) {
+        espw_pmk_job.pt = espw_sae_pt_new(espw_pmk_job.config.sta.ssid,
+            strnlen((const char *)espw_pmk_job.config.sta.ssid, 32),
+            espw_pmk_job.config.sta.password,
+            strlen((const char *)espw_pmk_job.config.sta.password));
+        if (!espw_pmk_job.pt || !espw_pmk_job.access_point) return;
+    }
+#endif
     (void)tiku_kits_crypto_pbkdf2_hmac_sha1(
         espw_pmk_job.config.sta.password,
         strlen((const char *)espw_pmk_job.config.sta.password),
@@ -346,30 +390,88 @@ static void espw_pmk_derive(void *arg) {
         ESPW_PSK_ROUNDS, espw_pmk_job.pmk, sizeof espw_pmk_job.pmk);
 }
 
+/** @brief Reserve a crypto worker stack and start the credential derivation. */
+static int key_worker_start(void)
+{
+#if TIKU_ESP_SAE_ENABLE
+    bool sae = espw_pmk_job.access_point ?
+        espw_pmk_job.config.ap.authmode == WIFI_AUTH_WPA3_PSK :
+        espw_pmk_job.config.sta.threshold.authmode == WIFI_AUTH_WPA3_PSK;
+    if (sae) {
+        espw_pmk_job.stack = espw_malloc(4096);
+        if (!espw_pmk_job.stack) return -1;
+        espw_pmk_worker.stack_base = espw_pmk_job.stack;
+        espw_pmk_worker.stack_size = 4096;
+    }
+#endif
+    int rc = tiku_thread_start(&espw_pmk_worker, espw_pmk_derive, NULL);
+#if TIKU_ESP_SAE_ENABLE
+    if (rc) {
+        espw_free(espw_pmk_job.stack); espw_pmk_job.stack = NULL;
+        espw_pmk_worker.stack_base = espw_pmk_worker_stack;
+        espw_pmk_worker.stack_size = sizeof espw_pmk_worker_stack;
+    }
+#endif
+    return rc;
+}
+
 /** @brief Reap a completed derivation; cancelled work cannot join. */
 static void espw_pmk_collect(void) {
     if (!espw_pmk_job.active || !tiku_thread_is_done(&espw_pmk_worker)) {
         return;
     }
     (void)tiku_thread_forget(&espw_pmk_worker);
-    if (!espw_pmk_job.cancelled && espw_up &&
-        espw_link == TIKU_WIRELESS_LINK_CONNECTING) {
-        espw_wpa_set_pmk(espw_pmk_job.pmk);
-        espw_join_configure(&espw_pmk_job.config);
+#if TIKU_ESP_SAE_ENABLE
+    if (espw_pmk_job.stack && !espw_pmk_job.pt && !espw_pmk_job.cancelled) {
+        espw_pmk_job.cancelled = 1;
+#if TIKU_WIRELESS_AP_ENABLE
+        if (espw_pmk_job.access_point && espw_dual) {
+            espw_ap_mode = 0; espw_ap.active = 0;
+        } else
+#endif
+        espw_join_failed((uint32_t)ESP_ERR_NO_MEM, "SAE derivation failed");
     }
-    tiku_radio_wipe(&espw_pmk_job, sizeof espw_pmk_job);
-    tiku_radio_wipe(espw_pmk_worker_stack, sizeof espw_pmk_worker_stack);
+#endif
+    if (!espw_pmk_job.cancelled && espw_up &&
+        (espw_link == TIKU_WIRELESS_LINK_CONNECTING
+#if TIKU_WIRELESS_AP_ENABLE
+         || (espw_pmk_job.access_point && espw_ap_mode)
+#endif
+        )) {
+#if TIKU_ESP_SAE_ENABLE
+        espw_sae_configure(espw_pmk_job.pt, espw_pmk_job.access_point);
+        espw_pmk_job.pt = NULL;
+#endif
+#if TIKU_WIRELESS_AP_ENABLE
+        if (espw_pmk_job.access_point)
+            espw_ap_configure(&espw_pmk_job.config, espw_pmk_job.pmk);
+        else
+#endif
+        {
+            espw_wpa_set_pmk(espw_pmk_job.pmk);
+            espw_join_configure(&espw_pmk_job.config);
+        }
+    }
+#if TIKU_ESP_SAE_ENABLE
+    espw_sae_pt_free(espw_pmk_job.pt);
+    if (espw_pmk_job.stack) espw_key_wipe(espw_pmk_job.stack, 4096);
+    espw_free(espw_pmk_job.stack);
+    espw_pmk_worker.stack_base = espw_pmk_worker_stack;
+    espw_pmk_worker.stack_size = sizeof espw_pmk_worker_stack;
+#endif
+    espw_key_wipe(&espw_pmk_job, sizeof espw_pmk_job);
+    espw_key_wipe(espw_pmk_worker_stack, sizeof espw_pmk_worker_stack);
 }
 #endif
 
 /**
  * @brief Configure the station for the network asked for and start joining,
- *        leaving the one joined first.  The passphrase becomes its PMK here
- *        and is wiped; PMF goes off; the strongest AP of the name is tried.
+ *        leaving the one joined first. Credentials are cleared after setup;
+ *        SAE requires PMF, and the strongest matching AP is tried.
  */
 static void espw_join_begin(void) {
     size_t slen, plen = strlen(espw_want_psk);
-#if !TIKU_C6_RADIO_SERVICE_ENABLE
+#if !ESPW_CREDENTIAL_WORKER
     uint8_t pmk[ESPW_PMK_LEN];
 #endif
     wifi_config_t cfg;
@@ -397,14 +499,23 @@ static void espw_join_begin(void) {
     if (plen != 0U) {
         memcpy(cfg.sta.password, espw_want_psk, plen);
         cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-#if TIKU_C6_RADIO_SERVICE_ENABLE
+#if TIKU_ESP_SAE_ENABLE
+        if (espw_want_auth == TIKU_WIRELESS_AUTH_WPA3_SAE) {
+            cfg.sta.threshold.authmode = WIFI_AUTH_WPA3_PSK;
+            cfg.sta.pmf_cfg.capable = cfg.sta.pmf_cfg.required = true;
+            cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_HASH_TO_ELEMENT;
+            cfg.sta.sae_pk_mode = WPA3_SAE_PK_MODE_DISABLED;
+        }
+#endif
+#if ESPW_CREDENTIAL_WORKER
         espw_pmk_job.config = cfg;
         espw_pmk_job.active = 1U;
         espw_pmk_job.cancelled = 0U;
-        tiku_radio_wipe(espw_want_psk, sizeof espw_want_psk);
-        tiku_radio_wipe(&cfg, sizeof cfg);
-        if (tiku_thread_start(&espw_pmk_worker, espw_pmk_derive, NULL) != 0) {
-            tiku_radio_wipe(&espw_pmk_job, sizeof espw_pmk_job);
+        espw_pmk_job.access_point = 0U;
+        espw_key_wipe(espw_want_psk, sizeof espw_want_psk);
+        espw_key_wipe(&cfg, sizeof cfg);
+        if (key_worker_start() != 0) {
+            espw_key_wipe(&espw_pmk_job, sizeof espw_pmk_job);
             espw_join_failed((uint32_t)ESP_ERR_NO_MEM, "no key worker slot");
         } else if (tiku_thread_await(&espw_pmk_worker, &espw_runner)) {
             tiku_process_poll(&espw_runner);
@@ -419,6 +530,9 @@ static void espw_join_begin(void) {
 #endif
     } else {
         espw_wpa_set_pmk(NULL);
+#if TIKU_ESP_SAE_ENABLE
+        espw_sae_configure(NULL, false);
+#endif
         cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
     }
     memset(espw_want_psk, 0, sizeof espw_want_psk);
@@ -427,6 +541,9 @@ static void espw_join_begin(void) {
 
 /** @brief The station has joined: the handshake (if any) is done. */
 static void espw_join_up(void) {
+#if TIKU_WIRELESS_AP_ENABLE
+    if (espw_ap_mode && !espw_dual) return;
+#endif
     if (espw_link != TIKU_WIRELESS_LINK_CONNECTING) {
         return;                 /* left since, or a repeat */
     }
@@ -447,7 +564,11 @@ static void espw_join_up(void) {
  *        ESPW_JOIN_TRIES in all; a link that dropped is rejoined so.
  */
 static void espw_join_down(uint32_t reason) {
-    if (!espw_up || (reason == WIFI_REASON_ASSOC_LEAVE &&
+    if (
+#if TIKU_WIRELESS_AP_ENABLE
+        (espw_ap_mode && !espw_dual) ||
+#endif
+        !espw_up || (reason == WIFI_REASON_ASSOC_LEAVE &&
                      espw_link != TIKU_WIRELESS_LINK_JOINED)) {
         return;
     }
@@ -485,15 +606,20 @@ static void espw_join_down(uint32_t reason) {
  *        thread -- one runner event outstanding at most, and a poller woken.
  *        With no receiver, or the queue full, the frame goes straight back.
  */
-static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb) {
+static esp_err_t espw_rx_enqueue(uint8_t interface, void *buffer, uint16_t len, void *eb) {
     uint8_t next, post = 0U;
 
     tiku_atomic_enter();
     next = (uint8_t)((espw_rx_head + 1U) % ESPW_RX_SLOTS);
-    if (espw_rx_cb != NULL && next != espw_rx_tail) {
+    if ((espw_rx_cb != NULL
+#if TIKU_WIRELESS_AP_ENABLE
+         || espw_rx_if_cb != NULL
+#endif
+        ) && next != espw_rx_tail) {
         espw_rxq[espw_rx_head].buf = buffer;
         espw_rxq[espw_rx_head].eb = eb;
         espw_rxq[espw_rx_head].len = len;
+        espw_rxq[espw_rx_head].interface = interface;
         espw_rx_head = next;
         post = !espw_rx_posted;
         espw_rx_posted = 1U;
@@ -510,6 +636,15 @@ static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb) {
     }
     return ESP_OK;
 }
+
+/** @brief Retain the station interface identity through deferred delivery. */
+static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb)
+{ return espw_rx_enqueue(0, buffer, len, eb); }
+#if TIKU_WIRELESS_AP_ENABLE
+/** @brief Retain the AP interface identity through deferred delivery. */
+static esp_err_t espw_rx_ap(void *buffer, uint16_t len, void *eb)
+{ return espw_rx_enqueue(1, buffer, len, eb); }
+#endif
 
 /** @brief In the kernel thread: hand each queued frame to the receiver
  *         (unless @p deliver is 0), then give its buffer back.
@@ -528,10 +663,20 @@ static int espw_rx_drain(int deliver) {
         f = espw_rxq[espw_rx_tail];
         espw_rx_tail = (uint8_t)((espw_rx_tail + 1U) % ESPW_RX_SLOTS);
         tiku_atomic_exit();
-        if (deliver && espw_rx_cb != NULL &&
-            espw_link == TIKU_WIRELESS_LINK_JOINED) {
-            espw_rx_cb((const uint8_t *)f.buf, f.len, espw_rx_ctx);
-            n++;
+        if (deliver) {
+#if TIKU_WIRELESS_AP_ENABLE
+            uint8_t active = f.interface == 1 ? espw_ap.active :
+                             espw_link == TIKU_WIRELESS_LINK_JOINED;
+            if (active && espw_rx_if_cb) {
+                espw_rx_if_cb(f.interface, f.buf, f.len, espw_rx_ctx); n++;
+            } else if (active && espw_rx_cb && (!espw_dual || !f.interface)) {
+                espw_rx_cb(f.buf, f.len, espw_rx_ctx); n++;
+            }
+#else
+            if (espw_rx_cb && espw_link == TIKU_WIRELESS_LINK_JOINED) {
+                espw_rx_cb(f.buf, f.len, espw_rx_ctx); n++;
+            }
+#endif
         }
         esp_wifi_internal_free_rx_buffer(f.eb);
     }
@@ -544,7 +689,13 @@ TIKU_PROCESS_THREAD(espw_runner, ev, data)
     TIKU_PROCESS_BEGIN();
     for (;;) {
         TIKU_PROCESS_WAIT_EVENT();
-#if TIKU_C6_RADIO_SERVICE_ENABLE
+#if TIKU_WIRELESS_AP_ENABLE
+        if (espw_ap.active) {
+            espw_ap_poll();
+            tiku_timer_set_event(&espw_ap_timer, TIKU_CLOCK_SECOND / 4);
+        }
+#endif
+#if ESPW_CREDENTIAL_WORKER
         espw_pmk_collect();
 #endif
         if (ev == TIKU_WIRELESS_EVT_SCAN_START) {
@@ -588,7 +739,12 @@ static void espw_config(wifi_init_config_t *c) {
     c->mgmt_sbuf_num = 12;
     c->espnow_max_encrypt_num = 7;
     c->tx_hetb_queue_num = 1;
+#if TIKU_ESP_SAE_ENABLE
+    c->feature_caps = 1u;
+    c->wifi_task_stack_size = 6144;
+#else
     c->wifi_task_stack_size = 3072;
+#endif
     c->magic = (int)WIFI_INIT_CONFIG_MAGIC;
 }
 
@@ -601,6 +757,9 @@ static void espw_config(wifi_init_config_t *c) {
 static void espw_teardown(int stage) {
     if (stage >= 3) {
         espw_wpa_unregister();
+#if TIKU_ESP_SAE_ENABLE
+        espw_sae_stop();
+#endif
         (void)esp_wifi_deinit_internal();
         espw_modem_wifi_inited(0);
         espw_modem_wifi_clock_off();
@@ -683,8 +842,26 @@ static int espw_power_down(void) {
     esp_err_t rc;
 
     espw_want = 0U;
+#if ESPW_CREDENTIAL_WORKER
+    espw_pmk_job.cancelled = 1;
+#if TIKU_ESP_SAE_ENABLE
+    if (espw_pmk_job.active && espw_pmk_job.stack) {
+        (void)tiku_thread_join(&espw_pmk_worker);
+        espw_pmk_collect();
+    }
+#endif
+#endif
     memset(espw_want_psk, 0, sizeof espw_want_psk);
-    espw_leave();
+#if TIKU_WIRELESS_AP_ENABLE
+    if (espw_ap_mode) {
+        espw_link = TIKU_WIRELESS_LINK_IDLE;
+        (void)esp_wifi_internal_reg_rxcb(WIFI_IF_AP, NULL);
+        espw_ap = (tiku_wireless_ap_status_t){0};
+        espw_ap_mode = 0;
+        (void)tiku_process_post(TIKU_PROCESS_BROADCAST, TIKU_WIRELESS_EVT_LINK_DOWN, NULL);
+    } else
+#endif
+        espw_leave();
     (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, NULL);
     rc = esp_wifi_stop();
     if (rc != ESP_OK) {
@@ -692,6 +869,9 @@ static int espw_power_down(void) {
     }
     (void)espw_rx_drain(0);             /* the stack's buffers, back */
     espw_up = 0U;
+#if TIKU_WIRELESS_AP_ENABLE
+    espw_dual = 0;
+#endif
     espw_scanning = 0U;
     espw_arch_sleep_hold(0);
     espw_heap_stats(&st);
@@ -738,7 +918,11 @@ int tiku_wireless_status(tiku_wireless_status_t *out) {
         out->joined_ssid_len = (uint8_t)strlen(espw_ssid);
         memcpy(out->joined_ssid, espw_ssid, out->joined_ssid_len);
         memcpy(out->joined_bssid, espw_bssid, sizeof out->joined_bssid);
-        if (esp_wifi_sta_get_rssi(&rssi) == ESP_OK) {
+        if (
+#if TIKU_WIRELESS_AP_ENABLE
+            (!espw_ap_mode || espw_dual) &&
+#endif
+            esp_wifi_sta_get_rssi(&rssi) == ESP_OK) {
             out->rssi_dbm = (int16_t)rssi;
         }
     }
@@ -747,7 +931,11 @@ int tiku_wireless_status(tiku_wireless_status_t *out) {
 
 int tiku_wireless_scan_start(void) {
     RADIO_OWNER_CHECK();
-    if (!espw_up) {
+    if (!espw_up
+#if TIKU_WIRELESS_AP_ENABLE
+        || (espw_ap_mode && !espw_dual)
+#endif
+    ) {
         return TIKU_DRV_ERR_INVALID;
     }
     if (espw_scanning || espw_want ||
@@ -768,23 +956,31 @@ uint8_t tiku_wireless_scan_results(tiku_wireless_ap_t *out,
     return out != NULL ? n : 0U;
 }
 
-/* WPA2-PSK, or an open network for an empty passphrase; WPA3 not yet. */
+/* Empty WPA2 credentials select open authentication; SAE requires a password. */
 int tiku_wireless_connect_auth(const char *ssid, const char *psk,
                                tiku_wireless_auth_t auth) {
     RADIO_OWNER_CHECK();
     size_t slen, plen;
 
     if (!espw_up || ssid == NULL || psk == NULL ||
-        auth != TIKU_WIRELESS_AUTH_WPA2_PSK) {
+#if TIKU_WIRELESS_AP_ENABLE
+        (espw_ap_mode && !espw_dual) ||
+#endif
+        (auth != TIKU_WIRELESS_AUTH_WPA2_PSK
+#if TIKU_ESP_SAE_ENABLE
+         && auth != TIKU_WIRELESS_AUTH_WPA3_SAE
+#endif
+        )) {
         return TIKU_DRV_ERR_INVALID;
     }
     slen = strnlen(ssid, sizeof espw_want_ssid);
     plen = strnlen(psk, sizeof espw_want_psk);
-    if (slen == 0U || slen > 32U || (plen != 0U && (plen < 8U || plen > 63U))) {
+    if (slen == 0U || slen > 32U || plen > 63U ||
+        (auth == TIKU_WIRELESS_AUTH_WPA3_SAE ? !plen : (plen && plen < 8U))) {
         return TIKU_DRV_ERR_INVALID;
     }
     if (
-#if TIKU_C6_RADIO_SERVICE_ENABLE
+#if ESPW_CREDENTIAL_WORKER
         espw_pmk_job.active ||
 #endif
         espw_want || espw_scanning ||
@@ -793,6 +989,7 @@ int tiku_wireless_connect_auth(const char *ssid, const char *psk,
     }
     memcpy(espw_want_ssid, ssid, slen + 1U);
     memcpy(espw_want_psk, psk, plen + 1U);
+    espw_want_auth = auth;
     espw_want = 1U;
     if (!tiku_process_post(&espw_runner, TIKU_WIRELESS_EVT_JOIN_START, NULL)) {
         espw_want = 0U;
@@ -808,11 +1005,15 @@ int tiku_wireless_connect(const char *ssid, const char *psk) {
 
 int tiku_wireless_disconnect(void) {
     RADIO_OWNER_CHECK();
-    if (!espw_up) {
+    if (!espw_up
+#if TIKU_WIRELESS_AP_ENABLE
+        || (espw_ap_mode && !espw_dual)
+#endif
+    ) {
         return TIKU_DRV_ERR_INVALID;
     }
-#if TIKU_C6_RADIO_SERVICE_ENABLE
-    espw_pmk_job.cancelled = 1U;
+#if ESPW_CREDENTIAL_WORKER
+    if (!espw_pmk_job.access_point) espw_pmk_job.cancelled = 1U;
 #endif
     espw_want = 0U;                     /* a join not yet begun is dropped */
     memset(espw_want_psk, 0, sizeof espw_want_psk);
@@ -823,6 +1024,12 @@ int tiku_wireless_disconnect(void) {
 /* Nothing is kept across boots: forgetting is leaving. */
 int tiku_wireless_forget(void) {
     RADIO_OWNER_CHECK();
+#if TIKU_WIRELESS_AP_ENABLE
+    if (espw_ap_mode) {
+        int rc = tiku_wireless_ap_stop();
+        if (rc || !espw_dual) return rc;
+    }
+#endif
     if (espw_up) {
         (void)tiku_wireless_disconnect();
     }
@@ -846,7 +1053,11 @@ int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
         !espw_up || espw_link != TIKU_WIRELESS_LINK_JOINED) {
         return TIKU_DRV_ERR_INVALID;
     }
-    rc = esp_wifi_internal_tx(WIFI_IF_STA, (void *)(uintptr_t)frame, len);
+    rc = esp_wifi_internal_tx(
+#if TIKU_WIRELESS_AP_ENABLE
+        espw_ap_mode && !espw_dual ? WIFI_IF_AP :
+#endif
+        WIFI_IF_STA, (void *)(uintptr_t)frame, len);
     if (rc == ESP_OK) {
         return TIKU_DRV_OK;
     }
@@ -860,6 +1071,9 @@ int tiku_wireless_set_rx(tiku_wireless_rx_t cb, void *ctx) {
     }
     tiku_atomic_enter();
     espw_rx_cb = cb;
+#if TIKU_WIRELESS_AP_ENABLE
+    espw_rx_if_cb = NULL;
+#endif
     espw_rx_ctx = ctx;
     tiku_atomic_exit();
     return TIKU_DRV_OK;
@@ -913,3 +1127,189 @@ const tiku_drv_t tiku_drv_wifi_esp = {
     .init   = espw_init,
     .deinit = espw_deinit,
 };
+
+#if TIKU_WIRELESS_AP_ENABLE
+/** @brief Apply AP configuration and restore the concurrent station receiver. */
+static void espw_ap_configure(wifi_config_t *cfg, const uint8_t *pmk)
+{
+    int rc;
+    /* A hexadecimal PMK keeps configuration from deriving it on the Wi-Fi task. */
+    if (pmk) {
+        static const char hex[] = "0123456789abcdef";
+        for (unsigned i = 0; i < 32; i++) {
+            cfg->ap.password[2 * i] = hex[pmk[i] >> 4];
+            cfg->ap.password[2 * i + 1] = hex[pmk[i] & 15];
+        }
+    }
+    (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, NULL);
+    rc = esp_wifi_stop();
+    (void)espw_rx_drain(0);
+    uint8_t reconnect = espw_dual && espw_link == TIKU_WIRELESS_LINK_JOINED;
+    if (!rc) rc = esp_wifi_set_mode(espw_dual ? WIFI_MODE_APSTA : WIFI_MODE_AP);
+    if (!rc) rc = esp_wifi_set_config(WIFI_IF_AP, cfg);
+    if (!rc && !cfg->ap.pmf_cfg.required) rc = esp_wifi_disable_pmf_config(WIFI_IF_AP);
+    espw_ap_key(pmk);
+    if (!rc) rc = esp_wifi_start();
+    if (!rc) rc = esp_wifi_internal_reg_rxcb(WIFI_IF_AP, espw_rx_ap);
+    if (!rc) rc = esp_wifi_get_mac(WIFI_IF_AP, espw_ap_mac);
+    if (!rc && espw_dual) rc = esp_wifi_internal_reg_rxcb(WIFI_IF_STA, espw_rx);
+    if (rc) {
+        espw_ap.active = 0;
+        espw_link = TIKU_WIRELESS_LINK_FAILED;
+        espw_link_raw = (uint32_t)rc;
+        if (reconnect)
+            (void)tiku_process_post(TIKU_PROCESS_BROADCAST, TIKU_WIRELESS_EVT_LINK_DOWN, NULL);
+    } else {
+        espw_ap.active = 1;
+        espw_ap.channel = cfg->ap.channel;
+        espw_ap.secured = cfg->ap.authmode == WIFI_AUTH_WPA3_PSK ? 2 :
+                          cfg->ap.authmode != WIFI_AUTH_OPEN;
+        if (!espw_dual) {
+            memcpy(espw_mac, espw_ap_mac, 6); memcpy(espw_bssid, espw_ap_mac, 6);
+            espw_link = TIKU_WIRELESS_LINK_JOINED;
+            (void)tiku_process_post(TIKU_PROCESS_BROADCAST, TIKU_WIRELESS_EVT_LINK_UP, NULL);
+        } else if (reconnect) {
+            espw_link = TIKU_WIRELESS_LINK_CONNECTING;
+            (void)esp_wifi_connect_internal();
+        }
+        tiku_process_poll(&espw_runner);
+    }
+    memset(cfg, 0, sizeof *cfg);
+}
+int tiku_wireless_ap_start_auth(const char *ssid, const char *psk, uint8_t channel,
+                                tiku_wireless_auth_t auth)
+{
+    RADIO_OWNER_CHECK();
+    if (!espw_up || !ssid || !psk || channel < 1 || channel > 11)
+        return TIKU_DRV_ERR_INVALID;
+    size_t sl = strnlen(ssid, 33), pl = strnlen(psk, 64);
+    if (!sl || sl > 32 || pl > 63 ||
+        (auth == TIKU_WIRELESS_AUTH_WPA3_SAE ? !pl : (pl && pl < 8)) ||
+        (auth != TIKU_WIRELESS_AUTH_WPA2_PSK
+#if TIKU_ESP_SAE_ENABLE
+         && auth != TIKU_WIRELESS_AUTH_WPA3_SAE
+#endif
+        )) return TIKU_DRV_ERR_INVALID;
+    if (espw_ap_mode || espw_want || espw_scanning ||
+        (espw_link != TIKU_WIRELESS_LINK_IDLE && !(espw_dual && espw_link == TIKU_WIRELESS_LINK_JOINED))
+#if ESPW_CREDENTIAL_WORKER
+        || espw_pmk_job.active
+#endif
+    ) return TIKU_DRV_ERR_TIMEOUT;
+    wifi_config_t cfg = {0};
+    memcpy(cfg.ap.ssid, ssid, sl);
+    memcpy(cfg.ap.password, psk, pl);
+    cfg.ap.ssid_len = sl;
+    cfg.ap.channel = channel;
+    cfg.ap.authmode = pl ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+#if TIKU_ESP_SAE_ENABLE
+    if (auth == TIKU_WIRELESS_AUTH_WPA3_SAE) {
+        cfg.ap.authmode = WIFI_AUTH_WPA3_PSK;
+        cfg.ap.pmf_cfg.capable = cfg.ap.pmf_cfg.required = true;
+        cfg.ap.sae_pwe_h2e = WPA3_SAE_PWE_HASH_TO_ELEMENT;
+    }
+#endif
+    cfg.ap.max_connection = ESPW_AP_MAX_CLIENTS;
+    cfg.ap.beacon_interval = 100;
+    cfg.ap.dtim_period = 1;
+    cfg.ap.pairwise_cipher = WIFI_CIPHER_TYPE_CCMP;
+    if (!espw_dual) memcpy(espw_ssid, ssid, sl + 1);
+    espw_ap_mode = 1;
+    if (!espw_dual) espw_link = TIKU_WIRELESS_LINK_CONNECTING;
+#if ESPW_CREDENTIAL_WORKER
+    if (pl) {
+        espw_pmk_job.config = cfg;
+        espw_pmk_job.active = espw_pmk_job.access_point = 1;
+        espw_pmk_job.cancelled = 0;
+        memset(&cfg, 0, sizeof cfg);
+        if (key_worker_start()) {
+            espw_key_wipe(&espw_pmk_job, sizeof espw_pmk_job);
+            espw_ap_mode = 0;
+            if (!espw_dual) espw_link = TIKU_WIRELESS_LINK_IDLE;
+            return TIKU_DRV_ERR_TIMEOUT;
+        }
+        (void)tiku_thread_await(&espw_pmk_worker, &espw_runner);
+    } else {
+#if TIKU_ESP_SAE_ENABLE
+        espw_sae_configure(NULL, true);
+#endif
+        espw_ap_configure(&cfg, NULL);
+    }
+#else
+    uint8_t pmk[32];
+    if (pl) tiku_kits_crypto_pbkdf2_hmac_sha1((const uint8_t *)psk, pl,
+              (const uint8_t *)ssid, sl, ESPW_PSK_ROUNDS, pmk, sizeof pmk);
+    espw_ap_configure(&cfg, pl ? pmk : NULL);
+    memset(pmk, 0, sizeof pmk);
+#endif
+    return TIKU_DRV_OK;
+}
+int tiku_wireless_ap_start(const char *ssid, const char *psk, uint8_t channel)
+{
+    return tiku_wireless_ap_start_auth(ssid, psk, channel, TIKU_WIRELESS_AUTH_WPA2_PSK);
+}
+int tiku_wireless_ap_stop(void)
+{
+    RADIO_OWNER_CHECK();
+    if (!espw_ap_mode) return TIKU_DRV_OK;
+    if (espw_dual) {
+#if ESPW_CREDENTIAL_WORKER
+        if (espw_pmk_job.active && espw_pmk_job.access_point) espw_pmk_job.cancelled = 1;
+#endif
+        int rc = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (rc) return TIKU_DRV_ERR_IO;
+        (void)esp_wifi_internal_reg_rxcb(WIFI_IF_AP, NULL);
+        espw_ap_mode = 0; espw_ap = (tiku_wireless_ap_status_t){0};
+#if TIKU_ESP_SAE_ENABLE
+        espw_sae_configure(NULL, true);
+#endif
+        return TIKU_DRV_OK;
+    }
+    int r = espw_power_down();
+    return r ? r : espw_power_up();
+}
+int tiku_wireless_ap_status(tiku_wireless_ap_status_t *out)
+{
+    if (!out) return TIKU_DRV_ERR_INVALID;
+    *out = espw_ap;
+    out->clients = espw_ap.active ? espw_ap_clients() : 0;
+    if (espw_dual && espw_link == TIKU_WIRELESS_LINK_JOINED) out->channel = espw_channel;
+    return TIKU_DRV_OK;
+}
+#endif
+
+#if TIKU_WIRELESS_AP_ENABLE
+int tiku_wireless_dual(uint8_t enable)
+{
+    RADIO_OWNER_CHECK();
+    if (!espw_up || enable > 1) return TIKU_DRV_ERR_INVALID;
+    if (espw_ap_mode || espw_want || espw_scanning || espw_link != TIKU_WIRELESS_LINK_IDLE)
+        return TIKU_DRV_ERR_TIMEOUT;
+    espw_dual = enable;
+    return TIKU_DRV_OK;
+}
+uint8_t tiku_wireless_is_dual(void) { return espw_dual; }
+int tiku_wireless_ap_mac(uint8_t mac[6])
+{
+    if (!mac || !espw_up) return TIKU_DRV_ERR_INVALID;
+    return esp_wifi_get_mac(WIFI_IF_AP, mac) ? TIKU_DRV_ERR_IO : TIKU_DRV_OK;
+}
+int tiku_wireless_set_rx_if(tiku_wireless_rx_if_t cb, void *ctx)
+{
+    RADIO_OWNER_CHECK();
+    if (!espw_ready) return TIKU_DRV_ERR_NOT_PRESENT;
+    tiku_atomic_enter();
+    espw_rx_if_cb = cb; espw_rx_cb = NULL; espw_rx_ctx = ctx;
+    tiku_atomic_exit();
+    return TIKU_DRV_OK;
+}
+int tiku_wireless_tx_if(uint8_t interface, const uint8_t *frame, uint16_t len)
+{
+    RADIO_OWNER_CHECK();
+    if (interface > 1 || !frame || len < ESPW_ETH_HDR || len > ESPW_ETH_MAX || !espw_up ||
+        (interface ? !espw_ap.active : espw_link != TIKU_WIRELESS_LINK_JOINED))
+        return TIKU_DRV_ERR_INVALID;
+    int rc = esp_wifi_internal_tx(interface ? WIFI_IF_AP : WIFI_IF_STA, (void *)frame, len);
+    return !rc ? TIKU_DRV_OK : rc == ESP_ERR_NO_MEM ? TIKU_DRV_ERR_TIMEOUT : TIKU_DRV_ERR_IO;
+}
+#endif

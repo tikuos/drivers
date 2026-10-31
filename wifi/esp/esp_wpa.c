@@ -1,11 +1,8 @@
 /*
  * Tiku Drivers - ESP32-C61 radio: the station's supplicant
  *
- * The libraries leave WPA to a supplicant they call through a table, and
- * consult it even to scan.  This one is tikuOS's own, written from IEEE
- * 802.11-2020 12.7: it reads RSN elements, and joins open networks and
- * WPA2-PSK ones -- CCMP both ways, no PMF -- through the 4-way and group
- * key handshakes, over TikuKits' HMAC-SHA1 and AES key wrap.
+ * Native RSN parsing, WPA2-PSK and SAE CCMP four-way and group exchanges.
+ * SAE requires protected management frames with BIP-CMAC-128.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -20,6 +17,12 @@
 #include <tikukits/crypto/hmac/tiku_kits_crypto_hmac_sha1.h>
 #include "esp_heap.h"
 #include "esp_port.h"
+#if TIKU_ESP_SAE_ENABLE
+#include "esp_sae.h"
+#endif
+#if TIKU_WIRELESS_AP_ENABLE
+#include "esp_ap.h"
+#endif
 
 #define EID_RSN         48U
 #define EID_VENDOR      221U
@@ -98,10 +101,14 @@ static const uint8_t wpa_assoc_ie[] = {
     1, 0, 0x00, 0x0F, 0xAC, 2,          /* AKM: PSK */
     0, 0                                /* capabilities */
 };
+static const uint8_t sae_assoc_ie[] = {
+    EID_RSN,26,1,0,0,15,172,4,1,0,0,15,172,4,1,0,0,15,172,8,
+    0xc0,0,0,0,0,15,172,6,244,1,0x20
+};
 /* The library retains this buffer and writes its two-byte length prefix. */
 static struct {
     uint16_t length;
-    uint8_t ie[sizeof wpa_assoc_ie];
+    uint8_t ie[sizeof sae_assoc_ie];
 } wpa_assoc_buffer;
 
 /* A group key as the AP gave it: key, index, and its receive counter. */
@@ -109,6 +116,9 @@ typedef struct {
     uint8_t key[KEY_LEN];
     uint8_t idx;
     uint8_t rsc[GTK_RSC_LEN];
+#if TIKU_ESP_SAE_ENABLE
+    wifi_wpa_igtk_t mgmt;
+#endif
 } wpa_gtk_t;
 
 /* One station, one handshake: called only from the libraries' task.  The
@@ -120,6 +130,7 @@ typedef struct __attribute__((aligned(4))) {
     uint8_t ptk[PTK_LEN];
     wpa_gtk_t gtk;                      /* the one in use, or to go in */
     uint8_t state;
+    uint8_t sae;
     uint8_t renew;                      /* a new SNonce at the next message 1 */
     uint8_t replay_set;
     uint8_t own[ADDR_LEN];              /* SPA */
@@ -137,7 +148,7 @@ static wpa_sta_t s;
 static uint8_t wpa_pmk[PMK_LEN];        /* the driver's, for the next join */
 static uint8_t wpa_pmk_set;
 static uint8_t wpa_rx[EAPOL_HDR + KEY_BODY + KEY_DATA_MAX];
-static uint8_t wpa_tx[ETH_HDR + EAPOL_HDR + KEY_BODY + sizeof wpa_assoc_ie];
+static uint8_t wpa_tx[ETH_HDR + EAPOL_HDR + KEY_BODY + sizeof sae_assoc_ie];
 static uint8_t wpa_kd[KEY_DATA_MAX];
 
 /*---------------------------------------------------------------------------*/
@@ -223,8 +234,8 @@ static unsigned le16(const uint8_t *p) {
 }
 
 /**
- * @brief Read an RSN element (ID 48) or a WPA one (vendor 221, 00-50-F2 type
- *        1), header included.  Fields an element stops before take their
+ * @brief Read an RSN (48), RSNX (244) or WPA (221, 00-50-F2 type 1)
+ *        element, header included.  Fields an element stops before take their
  *        defaults: CCMP both ways and 802.1X for RSN, TKIP and 802.1X for
  *        WPA.  @return 0, or -1 for an element too short or of another kind
  */
@@ -236,6 +247,11 @@ static int wpa_parse(const uint8_t *ie, size_t len, wifi_wpa_ie_t *out) {
     memset(out, 0, sizeof *out);
     if (ie == NULL || len < 2U || (size_t)ie[1] + 2U > len) {
         return -1;
+    }
+    if (ie[0] == 244U) {
+        if (!ie[1] || (unsigned)(ie[2] & 15U) + 1U != ie[1]) return -1;
+        out->rsnxe_capa = ie[2];
+        return 0;
     }
     end = ie + 2 + ie[1];
     rsn = ie[0] == EID_RSN;
@@ -349,6 +365,9 @@ static void wpa_derive_ptk(uint8_t ptk[PTK_LEN]) {
     memcpy(data + 2U * ADDR_LEN, lo ? s.snonce : s.anonce, NONCE_LEN);
     memcpy(data + 2U * ADDR_LEN + NONCE_LEN, lo ? s.anonce : s.snonce,
            NONCE_LEN);
+#if TIKU_ESP_SAE_ENABLE
+    if (s.sae) { espw_ptk_sha256(s.pmk, data, ptk); return; }
+#endif
     for (i = 0U; i < 3U; i++) {
         (void)tiku_kits_crypto_hmac_sha1_init(&h, s.pmk, PMK_LEN);
         /* The label with its NUL: the PRF's zero octet after it. */
@@ -370,6 +389,9 @@ static void wpa_mic(const uint8_t *kck, const uint8_t *f, size_t n,
                     uint8_t mic[MIC_LEN]) {
     uint8_t full[TIKU_KITS_CRYPTO_HMAC_SHA1_SIZE];
 
+#if TIKU_ESP_SAE_ENABLE
+    if (s.sae) { (void)espw_cmac(kck, f, n, mic); return; }
+#endif
     (void)tiku_kits_crypto_hmac_sha1(kck, KEY_LEN, f, n, full);
     memcpy(mic, full, MIC_LEN);
     memset(full, 0, sizeof full);
@@ -407,7 +429,7 @@ static int wpa_send(unsigned info, const uint8_t *replay,
     e[1] = EAPOL_KEY;
     put_be16(e + 2, (unsigned)(KEY_BODY + dlen));
     k[0] = KEY_DESC_RSN;
-    put_be16(k + K_INFO, info | KI_SHA1_AES);
+    put_be16(k + K_INFO, info | (s.sae ? 0 : KI_SHA1_AES));
     memcpy(k + K_REPLAY, replay, REPLAY_LEN);
     if (nonce != NULL) {
         memcpy(k + K_NONCE, nonce, NONCE_LEN);
@@ -428,6 +450,10 @@ static int wpa_send(unsigned info, const uint8_t *replay,
 static int wpa_key_data(const uint8_t *k, size_t dlen, const uint8_t *kek,
                         const uint8_t **rsn, wpa_gtk_t *out) {
     const uint8_t *p = wpa_kd, *gtk = NULL;
+#if TIKU_ESP_SAE_ENABLE
+    const uint8_t *igtk = NULL;
+#endif
+    memset(out, 0, sizeof *out);
     size_t n;
 
     if (dlen < 24U || (dlen % 8U) != 0U || dlen - 8U > sizeof wpa_kd ||
@@ -449,7 +475,14 @@ static int wpa_key_data(const uint8_t *k, size_t dlen, const uint8_t *kek,
             *rsn = p;
         } else if (p[0] == EID_VENDOR && len >= 8U &&
                    memcmp(p + 2, oui_rsn, 3) == 0 && p[5] == KDE_GTK) {
+            if (gtk) return -1;
             gtk = p;
+#if TIKU_ESP_SAE_ENABLE
+        } else if (s.sae && p[0] == EID_VENDOR && len >= 6U &&
+                   memcmp(p + 2, oui_rsn, 3) == 0 && p[5] == 9) {
+            if (igtk || len != 30 || p[7] || (p[6] != 4 && p[6] != 5)) return -1;
+            igtk = p;
+#endif
         }
         p += len;
         n -= len;
@@ -457,6 +490,12 @@ static int wpa_key_data(const uint8_t *k, size_t dlen, const uint8_t *kek,
     if (gtk == NULL || gtk[1] != 6U + KEY_LEN) {
         return -1;                          /* no GTK, or not a CCMP one */
     }
+#if TIKU_ESP_SAE_ENABLE
+    if (s.sae) {
+        if (!igtk) return -1;
+        memcpy(&out->mgmt, igtk + 6, 24);
+    }
+#endif
     memcpy(out->key, gtk + 8, KEY_LEN);
     out->idx = gtk[6] & 0x03U;
     memcpy(out->rsc, k + K_RSC, GTK_RSC_LEN);
@@ -472,14 +511,25 @@ static int wpa_rsn_ok(const uint8_t *ie) {
            d.group_cipher == WIFI_CIPHER_TYPE_CCMP &&
            (d.pairwise_cipher == WIFI_CIPHER_TYPE_CCMP ||
             d.pairwise_cipher == WIFI_CIPHER_TYPE_TKIP_CCMP) &&
-           ((unsigned)d.key_mgmt & WPA_KEY_MGMT_PSK) != 0U;
+           ((unsigned)d.key_mgmt & (s.sae ? WPA_KEY_MGMT_SAE : WPA_KEY_MGMT_PSK)) != 0U &&
+           (!s.sae || ((d.capabilities & 0x80) &&
+                       d.mgmt_group_cipher == WIFI_CIPHER_TYPE_AES_CMAC128));
 }
 
-static void wpa_install_gtk(void) {
-    (void)esp_wifi_set_sta_key_internal(WIFI_WPA_ALG_CCMP, s.bssid,
+static int wpa_install_gtk(void) {
+    return esp_wifi_set_sta_key_internal(WIFI_WPA_ALG_CCMP, s.bssid,
         s.gtk.idx, 0, s.gtk.rsc, GTK_RSC_LEN, s.gtk.key, KEY_LEN,
         KEY_FLAG_GROUP | KEY_FLAG_RX);
 }
+
+#if TIKU_ESP_SAE_ENABLE
+/** @brief Drop a station whose negotiated protection keys could not be installed. */
+static void key_failure(void)
+{
+    wpa_clear();
+    esp_wifi_deauthenticate_internal(15);
+}
+#endif
 
 /*---------------------------------------------------------------------------*/
 /* The handshakes                                                            */
@@ -488,6 +538,10 @@ static void wpa_install_gtk(void) {
 /** @brief Answer message 1 with the station nonce, RSN element and a MIC
  *         computed with the PTK awaiting message 3 validation. */
 static void wpa_msg1(const uint8_t *k) {
+#if TIKU_ESP_SAE_ENABLE
+    uint8_t pmkid[16];
+    if (s.sae && espw_sae_peer_key(s.bssid, s.pmk, pmkid)) return;
+#endif
     if (s.renew) {
         if (tiku_trng_arch_read_bytes(s.snonce, NONCE_LEN) != 0) {
             return;
@@ -496,8 +550,8 @@ static void wpa_msg1(const uint8_t *k) {
     }
     memcpy(s.anonce, k + K_NONCE, NONCE_LEN);
     wpa_derive_ptk(s.tptk);
-    if (wpa_send(KI_PAIRWISE | KI_MIC, k + K_REPLAY, s.snonce, wpa_assoc_ie,
-                 sizeof wpa_assoc_ie, s.tptk + PTK_KCK) == 0) {
+    if (wpa_send(KI_PAIRWISE | KI_MIC, k + K_REPLAY, s.snonce, s.sae ? sae_assoc_ie : wpa_assoc_ie,
+                 s.sae ? sizeof sae_assoc_ie : sizeof wpa_assoc_ie, s.tptk + PTK_KCK) == 0) {
         s.state = WPA_PTK_START;
     }
 }
@@ -544,9 +598,27 @@ static void wpa_group1(uint8_t *f, size_t n, unsigned info, size_t dlen) {
         return;
     }
     memcpy(s.replay, k + K_REPLAY, REPLAY_LEN);
-    if (gtk.idx != s.gtk.idx || !same(gtk.key, s.gtk.key, KEY_LEN)) {
+    if (gtk.idx != s.gtk.idx || !same(gtk.key, s.gtk.key, KEY_LEN)
+#if TIKU_ESP_SAE_ENABLE
+        || (s.sae && (!same(gtk.mgmt.igtk, s.gtk.mgmt.igtk, 16) ||
+                      memcmp(gtk.mgmt.keyid, s.gtk.mgmt.keyid, 2)))
+#endif
+    ) {
+#if TIKU_ESP_SAE_ENABLE
+        wifi_wpa_igtk_t old = s.gtk.mgmt;
+#endif
+        int changed = gtk.idx != s.gtk.idx || !same(gtk.key, s.gtk.key, KEY_LEN);
         s.gtk = gtk;
-        wpa_install_gtk();
+        int rc = changed ? wpa_install_gtk() : 0;
+#if TIKU_ESP_SAE_ENABLE
+        if (s.sae && (rc || ((!same(old.igtk, gtk.mgmt.igtk, 16) ||
+                            memcmp(old.keyid, gtk.mgmt.keyid, 2)) &&
+                            esp_wifi_set_igtk_internal(WIFI_IF_STA, &gtk.mgmt)))) {
+            memset(&gtk, 0, sizeof gtk); key_failure(); return;
+        }
+#else
+        (void)rc;
+#endif
     }
     memset(&gtk, 0, sizeof gtk);
     (void)wpa_send(KI_MIC | KI_SECURE, k + K_REPLAY, NULL, NULL, 0U,
@@ -574,7 +646,7 @@ static int wpa_rx_eapol(uint8_t *src, uint8_t *buf, uint32_t len) {
     info = be16(k + K_INFO);
     dlen = be16(k + K_DATA_LEN);
     if (k[0] != KEY_DESC_RSN || KEY_BODY + dlen > body ||
-        (info & KI_VERSION) != KI_SHA1_AES ||
+        (info & KI_VERSION) != (s.sae ? 0 : KI_SHA1_AES) ||
         (info & (KI_ERROR | KI_REQUEST)) != 0U || (info & KI_ACK) == 0U ||
         (s.replay_set && memcmp(k + K_REPLAY, s.replay, REPLAY_LEN) <= 0)) {
         return 0;
@@ -607,10 +679,17 @@ static void wpa_tx_done(uint8_t *eapol, size_t len, bool failed) {
         be16(eapol + EAPOL_HDR + K_DATA_LEN) != 0U || failed) {
         return;                     /* message 2, or 4 lost: 3 comes again */
     }
-    (void)esp_wifi_set_sta_key_internal(WIFI_WPA_ALG_CCMP, s.bssid, 0, 1,
+    int rc = esp_wifi_set_sta_key_internal(WIFI_WPA_ALG_CCMP, s.bssid, 0, 1,
         rsc0, sizeof rsc0, s.ptk + PTK_TK, KEY_LEN,
         KEY_FLAG_PAIRWISE | KEY_FLAG_RX | KEY_FLAG_TX);
-    wpa_install_gtk();
+    rc |= wpa_install_gtk();
+#if TIKU_ESP_SAE_ENABLE
+    if (s.sae && (rc || esp_wifi_set_igtk_internal(WIFI_IF_STA, &s.gtk.mgmt))) {
+        key_failure(); return;
+    }
+#else
+    (void)rc;
+#endif
     s.state = WPA_DONE;
     s.renew = 1U;
     memset(s.tptk, 0, sizeof s.tptk);
@@ -631,15 +710,19 @@ static int wpa_begin(const uint8_t *bssid) {
     unsigned group = cipher_bit(esp_wifi_sta_get_group_cipher_internal());
     uint8_t *pmk = esp_wifi_sta_get_ap_info_prof_pmk_internal();
 
-    if (esp_wifi_sta_get_prof_authmode_internal() != WPA2_AUTH_PSK ||
-        pair != CIPHER_CCMP || group != CIPHER_CCMP || pmk == NULL) {
-        ESPW_PRINTF("join: only WPA2-PSK with CCMP (auth %u, ciphers "
+#if TIKU_ESP_SAE_ENABLE
+    s.sae = esp_wifi_sta_get_prof_authmode_internal() == WPA3_AUTH_PSK;
+    if (s.sae != espw_sae_enabled(false)) return -1;
+#endif
+    if ((!s.sae && esp_wifi_sta_get_prof_authmode_internal() != WPA2_AUTH_PSK) ||
+        pair != CIPHER_CCMP || group != CIPHER_CCMP || (!s.sae && pmk == NULL)) {
+        ESPW_PRINTF("join: unsupported security (auth %u, ciphers "
                     "0x%x/0x%x)\n",
                     (unsigned)esp_wifi_sta_get_prof_authmode_internal(),
                     pair, group);
         return -1;
     }
-    if (esp_wifi_sta_get_reset_nvs_pmk_internal() != 0U) {
+    if (!s.sae && esp_wifi_sta_get_reset_nvs_pmk_internal() != 0U) {
         if (!wpa_pmk_set) {
             return -1;
         }
@@ -647,14 +730,19 @@ static int wpa_begin(const uint8_t *bssid) {
         (void)esp_wifi_sta_update_ap_info_internal();
         (void)esp_wifi_sta_set_reset_nvs_pmk_internal(0U);
     }
-    memcpy(s.pmk, pmk, PMK_LEN);
+    if (!s.sae) memcpy(s.pmk, pmk, PMK_LEN);
     memcpy(s.bssid, bssid, ADDR_LEN);
     (void)esp_wifi_get_macaddr_internal(WIFI_IF_STA, s.own);
-    memcpy(wpa_assoc_buffer.ie, wpa_assoc_ie, sizeof wpa_assoc_ie);
+    unsigned ie_len = s.sae ? 28 : sizeof wpa_assoc_ie;
+    memcpy(wpa_assoc_buffer.ie, s.sae ? sae_assoc_ie : wpa_assoc_ie, ie_len);
     if (esp_wifi_set_appie_internal(WIFI_APPIE_RSN,
-            (uint8_t *)&wpa_assoc_buffer, sizeof wpa_assoc_ie, 1U) != 0) {
+            (uint8_t *)&wpa_assoc_buffer, ie_len, 1U) != 0) {
         return -1;
     }
+#if TIKU_ESP_SAE_ENABLE
+    if (s.sae && esp_wifi_set_appie_internal(1, (uint8_t *)sae_assoc_ie + 28, 3, 0))
+        return -1;
+#endif
     s.renew = 1U;
     s.state = WPA_ASSOCIATING;
     return 0;
@@ -664,6 +752,9 @@ static int wpa_connect(uint8_t *bssid) {
     uint8_t auth = esp_wifi_sta_get_prof_authmode_internal();
 
     wpa_clear();
+#if TIKU_ESP_SAE_ENABLE
+    (void)esp_wifi_unset_appie_internal(1);
+#endif
     if (bssid == NULL) {
         return -1;
     }
@@ -683,6 +774,9 @@ static void wpa_connected(uint8_t *bssid) {
 
 static void wpa_disconnected(uint8_t reason) {
     (void)reason;
+#if TIKU_ESP_SAE_ENABLE
+    espw_sae_leave();
+#endif
     wpa_clear();
 }
 
@@ -731,6 +825,12 @@ int espw_wpa_register(void) {
     cb->wpa_sta_disconnected_cb = wpa_disconnected;
     cb->wpa_sta_rx_eapol = wpa_rx_eapol;
     cb->wpa_sta_in_4way_handshake = wpa_in_4way;
+#if TIKU_WIRELESS_AP_ENABLE
+    espw_ap_callbacks(cb);
+#endif
+#if TIKU_ESP_SAE_ENABLE
+    espw_sae_callbacks(cb);
+#endif
     cb->wpa_parse_wpa_ie = wpa_parse;
     cb->wpa_parse_wpa_ie_scan_only = wpa_parse;
     cb->wpa_michael_mic_failure = wpa_mic_failure;

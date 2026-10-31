@@ -20,12 +20,20 @@ CFLAGS += -DHAS_DRIVERS=1 -DHAS_TIKUKITS=1 -DTIKU_C6_IRQ_LAST=31
 C6_SRCS += drivers/tiku_drv_table.c $(addprefix drivers/wifi/esp/,esp_core.c esp_osi.c esp_heap.c \
     esp_glue.c c6/wifi_c6_arch.c c6/wifi_c6_phy.c)
 ifeq ($(TIKU_DRV_WIFI_ESP_ENABLE),1)
-CFLAGS += -DTIKU_DRV_WIFI_ESP_ENABLE=1
-C6_SRCS += $(addprefix drivers/wifi/esp/,esp_wpa.c esp_crypto.c tiku_drv_wifi_esp.c)
+CFLAGS += -DTIKU_DRV_WIFI_ESP_ENABLE=1 -DTIKU_WIRELESS_AP_ENABLE=1
+C6_SRCS += $(addprefix drivers/wifi/esp/,esp_wpa.c esp_ap.c esp_crypto.c tiku_drv_wifi_esp.c)
+include drivers/wifi/esp/sae/sources.mk
+ESP_SAE_ASSETS_OK := $(shell cd $(ESP_SAE_DIR) && sha256sum -c SHA256SUMS >/dev/null 2>&1 && echo yes)
+ifneq ($(ESP_SAE_ASSETS_OK),yes)
+$(error SAE sources missing or invalid: run python3 $(ESP_SAE_DIR)/fetch.py)
+endif
+CFLAGS += -DTIKU_ESP_SAE_ENABLE=1
+C6_SRCS += drivers/wifi/esp/esp_sae.c $(ESP_SAE_SRCS)
+$(addprefix $(BUILD_DIR)/,$(ESP_SAE_SRCS:.c=.o)): CFLAGS += $(ESP_SAE_FLAGS) -Wno-unused-parameter
 C6_SRCS += shell/commands/tiku_shell_cmd_wifi.c
 C6_SRCS += $(addprefix tikukits/crypto/,sha1/tiku_kits_crypto_sha1.c \
     hmac/tiku_kits_crypto_hmac_sha1.c pbkdf2/tiku_kits_crypto_pbkdf2.c \
-    aes128/tiku_kits_crypto_aes128.c aeskw/tiku_kits_crypto_aeskw.c sha256/tiku_kits_crypto_sha256.c)
+    aes128/tiku_kits_crypto_aes128.c aeskw/tiku_kits_crypto_aeskw.c sha256/tiku_kits_crypto_sha256.c ccm/tiku_kits_crypto_ccm.c)
 endif
 ifeq ($(TIKU_DRV_BLE_ESP_ENABLE),1)
 include $(C6_WIFI_DIR)/ble.mk

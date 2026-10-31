@@ -1,10 +1,9 @@
 /*
  * Tiku Drivers - ESP32-C61 radio: the crypto the libraries call themselves
  *
- * The stack takes a table of crypto at init and calls into it on its own
- * paths: PBKDF2, SHA-256 and AES for the soft-AP and the extras, CMAC, GMAC
- * and software CCMP for protected management frames.  Each entry is here,
- * over TikuKits; the PMF ones fail, as this port joins with PMF off.
+ * The stack receives a crypto table at initialization. TikuKits supplies
+ * PBKDF2, SHA-256, AES and CMAC. Protected management frames use CCMP and
+ * AES-CMAC; the GMAC callback rejects requests.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,6 +18,8 @@
 #include <tikukits/crypto/pbkdf2/tiku_kits_crypto_pbkdf2.h>
 #include <tikukits/crypto/sha256/tiku_kits_crypto_sha256.h>
 #include "esp_port.h"
+#include "esp_heap.h"
+#include <tikukits/crypto/ccm/tiku_kits_crypto_ccm.h>
 
 #define AES_BLOCK       16U
 #define SHA256_BLOCK    64U
@@ -153,40 +154,131 @@ static int crypto_aes_unwrap(const unsigned char *kek, size_t kek_len, int n,
            0 : -1;
 }
 
-/* Protected management frames: not offered, so each says it failed. */
-
-static int crypto_no_omac1(const uint8_t *key, const uint8_t *data,
-                           size_t data_len, uint8_t *mic) {
-    (void)key;
-    (void)data;
-    (void)data_len;
-    (void)mic;
-    return -1;
+/** @brief Erase temporary key material through volatile stores. */
+static void crypto_wipe(void *p, size_t n)
+{
+    volatile uint8_t *q = p;
+    while (n--) *q++ = 0;
 }
 
-static uint8_t *crypto_no_ccmp_decrypt(const uint8_t *tk, const uint8_t *hdr,
-                                       const uint8_t *data, size_t data_len,
-                                       size_t *decrypted_len, bool espnow) {
-    (void)tk;
-    (void)hdr;
-    (void)data;
-    (void)data_len;
-    (void)decrypted_len;
-    (void)espnow;
-    return NULL;
+/** @brief Double a CMAC subkey in GF(2^128), with reduction polynomial 0x87. */
+static void cmac_double(uint8_t k[16])
+{
+    uint8_t carry = k[0] >> 7;
+    for (unsigned i = 0; i < 15; i++) k[i] = (k[i] << 1) | (k[i + 1] >> 7);
+    k[15] = (k[15] << 1) ^ (0x87u & (0u - carry));
 }
 
-static uint8_t *crypto_no_ccmp_encrypt(const uint8_t *tk, uint8_t *frame,
-                                       size_t len, size_t hdrlen, uint8_t *pn,
-                                       int keyid, size_t *encrypted_len) {
-    (void)tk;
-    (void)frame;
-    (void)len;
-    (void)hdrlen;
-    (void)pn;
-    (void)keyid;
-    (void)encrypted_len;
-    return NULL;
+int espw_cmac(const uint8_t *key, const uint8_t *data, size_t len, uint8_t *mic)
+{
+    tiku_kits_crypto_aes128_ctx_t aes;
+    uint8_t subkey[16] = {0}, block[16] = {0};
+    if (!key || (!data && len) || !mic) return -1;
+    (void)tiku_kits_crypto_aes128_init(&aes, key);
+    (void)tiku_kits_crypto_aes128_encrypt(&aes, subkey, subkey);
+    cmac_double(subkey);
+    while (len > 16) {
+        for (unsigned i = 0; i < 16; i++) block[i] ^= data[i];
+        (void)tiku_kits_crypto_aes128_encrypt(&aes, block, block);
+        data += 16; len -= 16;
+    }
+    if (len < 16) {
+        cmac_double(subkey);
+        block[len] ^= 0x80;
+    }
+    for (unsigned i = 0; i < len; i++) block[i] ^= data[i];
+    for (unsigned i = 0; i < 16; i++) block[i] ^= subkey[i];
+    (void)tiku_kits_crypto_aes128_encrypt(&aes, block, mic);
+    crypto_wipe(&aes, sizeof aes);
+    crypto_wipe(subkey, sizeof subkey);
+    crypto_wipe(block, sizeof block);
+    return 0;
+}
+
+void espw_ptk_sha256(const uint8_t pmk[32], const uint8_t data[76], uint8_t ptk[48])
+{
+    static const uint8_t label[] = "Pairwise key expansion";
+    uint8_t count[2] = {1,0}, bits[2] = {0x80,1}, digest[32];
+    const uint8_t *addr[] = {count, label, data, bits};
+    const int lengths[] = {2, sizeof label - 1, 76, 2};
+    (void)crypto_hmac_sha256_vector(pmk, 32, 4, addr, lengths, digest);
+    memcpy(ptk, digest, 32);
+    count[0] = 2;
+    (void)crypto_hmac_sha256_vector(pmk, 32, 4, addr, lengths, digest);
+    memcpy(ptk + 32, digest, 16);
+    crypto_wipe(digest, sizeof digest);
+}
+
+/** @brief Accept unicast version-zero management headers with three addresses. */
+static int pmf_header(const uint8_t *h)
+{
+    return h && !(h[0] & 0x0f) && !(h[1] & 0x83) && !(h[4] & 1);
+}
+
+/** @brief Form the management CCMP nonce and masked authentication data. */
+static void pmf_aad(const uint8_t *h, const uint8_t *ccmp,
+                    uint8_t aad[22], uint8_t nonce[13])
+{
+    aad[0] = h[0]; aad[1] = (h[1] & ~0x38u) | 0x40u;
+    memcpy(aad + 2, h + 4, 18);
+    aad[20] = h[22] & 15; aad[21] = 0;
+    nonce[0] = 0x10;
+    memcpy(nonce + 1, h + 10, 6);
+    nonce[7] = ccmp[7]; nonce[8] = ccmp[6]; nonce[9] = ccmp[5];
+    nonce[10] = ccmp[4]; nonce[11] = ccmp[1]; nonce[12] = ccmp[0];
+}
+
+/** @brief Authenticate management CCMP; the vendor checks the peer's receive PN. */
+static uint8_t *crypto_ccmp_decrypt(const uint8_t *tk, const uint8_t *hdr,
+                                  const uint8_t *data, size_t len,
+                                  size_t *decrypted_len, bool espnow)
+{
+    uint8_t aad[22], nonce[13], tag[8], diff = 0;
+    if (!decrypted_len) return NULL;
+    *decrypted_len = 0;
+    if (!tk || !pmf_header(hdr) || !(hdr[1] & 0x40) || !data || espnow ||
+        len < 16 || len - 16 > 65535 || data[2] || data[3] != 0x20)
+        return NULL;
+    size_t n = len - 16;
+    uint8_t *out = espw_malloc(n ? n : 1);
+    if (!out) return NULL;
+    pmf_aad(hdr, data, aad, nonce);
+    int rc = tiku_kits_crypto_ccm_star(1, tk, nonce, aad, sizeof aad,
+                                      data + 8, n, 8, out, tag);
+    for (unsigned i = 0; i < 8; i++) diff |= tag[i] ^ data[8 + n + i];
+    crypto_wipe(tag, sizeof tag);
+    if (rc || diff) {
+        crypto_wipe(out, n); espw_free(out); return NULL;
+    }
+    *decrypted_len = n;
+    return out;
+}
+
+/** @brief Encrypt management payload stored after the vendor's eight-byte CCMP gap. */
+static uint8_t *crypto_ccmp_encrypt(const uint8_t *tk, uint8_t *frame,
+                                  size_t len, size_t hdrlen, uint8_t *pn,
+                                  int keyid, size_t *encrypted_len)
+{
+    uint8_t aad[22], nonce[13];
+    if (!encrypted_len) return NULL;
+    *encrypted_len = 0;
+    if (!tk || !frame || !pn || hdrlen != 24 || len < hdrlen ||
+        len - hdrlen > 65535 || !pmf_header(frame) || keyid != 0)
+        return NULL;
+    size_t n = len - hdrlen;
+    uint8_t *out = espw_malloc(len + 16);
+    if (!out) return NULL;
+    memcpy(out, frame, hdrlen); out[1] |= 0x40;
+    uint8_t *c = out + hdrlen;
+    c[0] = pn[5]; c[1] = pn[4]; c[2] = 0; c[3] = 0x20 | (keyid << 6);
+    c[4] = pn[3]; c[5] = pn[2]; c[6] = pn[1]; c[7] = pn[0];
+    pmf_aad(out, c, aad, nonce);
+    if (tiku_kits_crypto_ccm_star(0, tk, nonce, aad, sizeof aad,
+                                frame + hdrlen + 8, n, 8, c + 8, c + 8 + n)) {
+        crypto_wipe(out, len + 16); espw_free(out); return NULL;
+    }
+    *encrypted_len = len + 16;
+    return out;
 }
 
 static int crypto_no_gmac(const uint8_t *key, size_t keylen,
@@ -209,9 +301,9 @@ void espw_crypto_table(wpa_crypto_funcs_t *t) {
     t->pbkdf2_sha1 = crypto_pbkdf2_sha1;
     t->aes_128_encrypt = crypto_aes_128_encrypt;
     t->aes_128_decrypt = crypto_aes_128_decrypt;
-    t->omac1_aes_128 = crypto_no_omac1;
-    t->ccmp_decrypt = crypto_no_ccmp_decrypt;
-    t->ccmp_encrypt = crypto_no_ccmp_encrypt;
+    t->omac1_aes_128 = espw_cmac;
+    t->ccmp_decrypt = crypto_ccmp_decrypt;
+    t->ccmp_encrypt = crypto_ccmp_encrypt;
     t->aes_gmac = crypto_no_gmac;
     t->sha256_vector = crypto_sha256_vector;
     t->aes_wrap = crypto_aes_wrap;

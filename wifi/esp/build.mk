@@ -72,7 +72,7 @@ SRCS    += $(ESPW_DIR)/esp_crypto.c
 SRCS    += $(addprefix tikukits/crypto/, sha1/tiku_kits_crypto_sha1.c \
              hmac/tiku_kits_crypto_hmac_sha1.c pbkdf2/tiku_kits_crypto_pbkdf2.c \
              aes128/tiku_kits_crypto_aes128.c aeskw/tiku_kits_crypto_aeskw.c \
-             sha256/tiku_kits_crypto_sha256.c)
+             sha256/tiku_kits_crypto_sha256.c ccm/tiku_kits_crypto_ccm.c)
 CFLAGS  += -DTIKU_DRV_WIFI_ESP_ENABLE=1
 TIKU_XIP_LDS += $(ESPW_DIR)/esp_wifi_xip.ld
 endif

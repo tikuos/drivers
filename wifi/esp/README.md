@@ -147,14 +147,15 @@ and `/proc/wifi/` show the network, the AP's signal and the join time.
 
 The supplicant, `esp_wpa.c`, is tikuOS's own, written from IEEE
 802.11-2020 12.7 over TikuKits' HMAC-SHA1 and AES key wrap: the 4-way
-handshake, then group rekeys.  It joins WPA2-PSK with CCMP both ways and
-nothing else: no TKIP, no WPA3 (SAE), no PMF -- the driver turns PMF off
-for each join, and an AP that requires it is not joined.  The keys go to
+handshake, then group rekeys. The C61 and C5 profiles join WPA2-PSK with
+CCMP and disable PMF. The [C6 profile](c6/README.md) also supports WPA3-SAE
+H2E group 19 with required PMF. TKIP is refused.  The keys go to
 the radio only once message 4 has left, and never twice (no key
 reinstallation).  `TikuBench/tests/host/nonkernel/test_wpa.c` runs it
 against a scripted AP on the host (`make -C TikuBench/tests/host/nonkernel
 wpa`), the expected keys computed apart from it.  `esp_crypto.c` gives the
-libraries the crypto they call themselves; the PMF entries refuse.
+libraries the crypto they call themselves, including CCMP and AES-CMAC
+for the C6 PMF profile. GMAC is refused.
 
 `wifi up` puts the IP stack on the radio and asks for a DHCP lease; `ip`
 then shows the address, mask, gateway, DNS server and lease, and `ping`,

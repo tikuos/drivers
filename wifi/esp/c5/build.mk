@@ -99,7 +99,7 @@ SRCS += $(addprefix drivers/wifi/esp/,tiku_drv_wifi_esp.c esp_wpa.c esp_crypto.c
 SRCS += $(addprefix tikukits/crypto/,sha1/tiku_kits_crypto_sha1.c \
     hmac/tiku_kits_crypto_hmac_sha1.c pbkdf2/tiku_kits_crypto_pbkdf2.c \
     aes128/tiku_kits_crypto_aes128.c aeskw/tiku_kits_crypto_aeskw.c \
-    sha256/tiku_kits_crypto_sha256.c)
+    sha256/tiku_kits_crypto_sha256.c ccm/tiku_kits_crypto_ccm.c)
 CFLAGS += -DTIKU_DRV_WIFI_ESP_ENABLE=1
 LDFLAGS += $(addprefix -T$(C5_PHY_DIR)/vendor/esp32c5.rom.,coexist.ld net80211.ld pp.ld)
 LDLIBS += -Wl,--start-group $(addprefix $(C5_PHY_DIR)/vendor/,libnet80211.a libpp.a libcore.a libphy.a) -lm -lc -lgcc -Wl,--end-group

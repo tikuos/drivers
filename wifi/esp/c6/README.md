@@ -1,6 +1,6 @@
 # ESP32-C6 native Wi-Fi and BLE
 
-The C6 adapter runs Espressif's station libraries on TikuOS workers, queues,
+The C6 adapter runs Espressif's Wi-Fi libraries on TikuOS workers, queues,
 locks, allocator and timers. Application execution uses the native C6 kernel.
 The board's preserved SDK application provides the update/recovery path.
 
@@ -10,6 +10,7 @@ Fetch the target-specific archives, ROM scripts and licenses:
 
 ```sh
 sh drivers/wifi/esp/c6/fetch.sh
+python3 drivers/wifi/esp/sae/fetch.py
 ```
 
 `ASSETS.json` records immutable source URLs, file lengths and SHA-256 hashes.
@@ -36,7 +37,9 @@ profile.
 The shared OS table uses ABI version 9. C6 SDK measurements give 508 bytes for
 `wifi_osi_funcs_t`, 160 bytes for `wifi_init_config_t`, 92 bytes for
 `wifi_ap_record_t`, 128 bytes for PHY initialization and 1904 bytes for PHY
-calibration. The shared ABI header checks RV32 sizes and offsets.
+calibration. The shared ABI header checks RV32 sizes and offsets. Station feature flags
+begin at byte 130, following the two PMF bytes; the SAE method begins at
+byte 136. The host join test checks the serialized compatibility flag.
 
 SYSTIMER target 2 and PLIC lines 24–31 belong to the radio adapter while it
 runs. The kernel retains target 1/line 17 and its worker switch on line 18;
@@ -85,7 +88,9 @@ python3 -B TikuBench/tests/host/kernel/test_esp32c6_firmware.py
 ```
 
 Station authentication uses the shared independent supplicant: open and
-WPA2-PSK with CCMP. WPA3-SAE, TKIP and required PMF are refused. A controlled
+WPA2-PSK with CCMP, plus WPA3-SAE H2E group 19 with required PMF.
+The [SAE adapter](../sae/README.md) pins its sources and describes the
+password and group limits. TKIP is refused. A controlled
 ESP32-C5 AP on channel 6 has passed open and WPA2 association, DHCP and checked
 UDP/TCP traffic in both directions: 4,096 bytes per UDP flow and 8,192 bytes
 per TCP flow, with no payload errors or application retries. Deliberately
@@ -144,3 +149,41 @@ for the paired build and recovery contract.
 Host checks: `make -C TikuBench/tests/host/kernel c6-ble c6-radio ipc-radio`.
 Board captures and measured qualification results belong in `kintsugi/` or
 `temp/`.
+
+## Access-point implementation
+
+The native C6 driver offers `wifi ap start SSID PSK [channel]`,
+`wifi ap status` and `wifi ap stop`. It accepts channels 1 through 11 and
+up to four clients, with open authentication, WPA2-PSK/CCMP or WPA3-SAE with
+required PMF. `wifi ap start3 SSID PASSWORD [channel]` selects SAE. With
+simultaneous mode disabled, the station must be idle before AP start; stopping the AP returns the powered radio to station
+mode. The native C6 build derives the PMK on a worker and passes its
+64-byte hexadecimal encoding to the vendor configuration API. This keeps
+password derivation out of the vendor Wi-Fi task so mailbox and lease
+progress continue. AP authentication callbacks and retransmissions
+execute on the Wi-Fi task. Failed key installation disconnects the client.
+The kernel queues at most one pending AP maintenance job, allowing mailbox
+service to progress while the Wi-Fi task authenticates a peer.
+Secured APs renew the GTK every hour; SAE renews the IGTK in the same
+exchange. Remaining clients must authenticate the new keys before installation.
+A timeout disconnects that peer while responsive clients remain associated.
+Station SAE and each AP peer own separate authentication exchanges.
+`tiku_wireless_dual(1)` selects simultaneous operation while both interfaces
+are idle; the P4 shell exposes it as `wifi dual on`. Ethernet receive and
+transmit APIs identify the station or AP interface. The radio follows the
+station channel when both interfaces are active.
+
+The native C6 profile carries Ethernet frames and has no AP DHCP server.
+The [P4 service profile](../../ipc/README.md) runs DHCP and IP applications
+on P4 and persists settings there. It reuses the station's leased mailbox.
+Host checks for the authenticator, DHCP and rejected guard mutations run
+with `make -C TikuBench/tests/host/kernel wifi-ap` from the OS root.
+Paired P4/C6 hardware checks cover open, WPA2 and SAE/PMF AP association,
+wrong-password refusal, DHCP and checked TCP/UDP traffic. SAE checks
+observe GTK and IGTK index rotation during traffic with a 60-second
+renewal interval. Station checks cover SAE/PMF association, DHCP and
+checked UDP traffic against a C5 AP renewing keys every 60 seconds.
+Recovery checks cover C6 reset, saved WPA2 and SAE profile restoration
+after P4 reboot, and stale-PMKID rejection followed by SAE retry. These checks use an ESP32-C5 peer. AP traffic
+with concurrent BLE activity and physical power-cycle restoration are not
+qualified.
