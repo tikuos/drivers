@@ -56,6 +56,9 @@ static void espw_ap_configure(wifi_config_t *cfg, const uint8_t *pmk);
 #define ESPW_ETH_HDR     14U
 #define ESPW_ETH_MAX     1514U
 
+/* How long a frame waits in the kernel thread for a TX buffer to come free. */
+#define ESPW_TX_WAIT_MS  50U
+
 /* Attempts at a join, the first included, before it is reported failed. */
 #define ESPW_JOIN_TRIES  3U
 
@@ -143,6 +146,7 @@ static uint8_t            espw_rx_head;     /* the stack's task moves it */
 static uint8_t            espw_rx_tail;     /* the kernel thread moves it */
 static uint8_t            espw_rx_posted;   /* the runner has an event coming */
 static tiku_waitq_t       espw_rx_waitq;    /* a poller waiting for frames */
+static tiku_waitq_t       espw_tx_waitq;    /* a frame waiting for a buffer */
 static tiku_wireless_rx_t espw_rx_cb;
 static void              *espw_rx_ctx;
 
@@ -1047,17 +1051,32 @@ int tiku_wireless_saved_profile(tiku_wireless_saved_profile_t *out) {
 
 int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
     RADIO_OWNER_CHECK();
+    tiku_clock_time_t start = tiku_clock_time();
     int rc;
 
     if (frame == NULL || len < ESPW_ETH_HDR || len > ESPW_ETH_MAX ||
         !espw_up || espw_link != TIKU_WIRELESS_LINK_JOINED) {
         return TIKU_DRV_ERR_INVALID;
     }
-    rc = esp_wifi_internal_tx(
+    /* A burst of frames can hold every TX buffer the libraries have.  In the
+     * kernel thread the frame then waits a tick at a time, the libraries'
+     * workers running meanwhile, for a buffer to come free, up to
+     * ESPW_TX_WAIT_MS; elsewhere it is refused at once. */
+    for (;;) {
+        rc = esp_wifi_internal_tx(
 #if TIKU_WIRELESS_AP_ENABLE
-        espw_ap_mode && !espw_dual ? WIFI_IF_AP :
+            espw_ap_mode && !espw_dual ? WIFI_IF_AP :
 #endif
-        WIFI_IF_STA, (void *)(uintptr_t)frame, len);
+            WIFI_IF_STA, (void *)(uintptr_t)frame, len);
+        if (rc != ESP_ERR_NO_MEM || !tiku_thread_in_kernel() ||
+            (tiku_clock_time_t)(tiku_clock_time() - start) >=
+                TIKU_CLOCK_MS_TO_TICKS(ESPW_TX_WAIT_MS)) {
+            break;
+        }
+        tiku_atomic_enter();
+        (void)tiku_thread_wait(&espw_tx_waitq, 1UL);
+        tiku_atomic_exit();
+    }
     if (rc == ESP_OK) {
         return TIKU_DRV_OK;
     }
