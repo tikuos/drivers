@@ -27,7 +27,12 @@ make MCU=esp32c6 C6_PROFILE=firmware C6_STORAGE=1 \
 
 Install the application, ELF and memory report with the checked C6 installer
 described in the [native port README](../../../../arch/esp32c6/README.md).
-The radio profiles require storage, the shell and workers. They exclude SDR. Leave out `TIKU_KIT_NET_ENABLE=1` for station operation without IP.
+The radio profiles require storage and workers. The default profile also
+requires the shell. `TIKU_C6_RADIO_HEADLESS=1` permits a firmware profile
+with `TIKU_SHELL_ENABLE=0` and `TIKU_C6_RADIO_SERVICE_ENABLE=1`; its boot
+assembly must initialize the radio descriptors before serving requests.
+The headless profile adds the common CPU helpers and peripheral IRQ adapter.
+The generic SDR driver remains excluded from these profiles. Leave out `TIKU_KIT_NET_ENABLE=1` for station operation without IP.
 The IP profile includes IPv4, ICMP, UDP, TCP, DHCP and the Wi-Fi link adapter;
 TCP buffers reside in SRAM. DNS and NTP shell commands are disabled in this
 profile.

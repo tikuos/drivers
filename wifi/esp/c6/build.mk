@@ -4,8 +4,15 @@
 # SPDX-License-Identifier: Apache-2.0
 ifeq ($(MCU),esp32c6)
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_BLE_ESP_ENABLE)),)
+ifeq ($(TIKU_C6_RADIO_HEADLESS),1)
+ifneq ($(C6_PROFILE):$(TIKU_SHELL_ENABLE):$(C6_STORAGE):$(TIKU_THREADS_ENABLE):$(TIKU_C6_RADIO_SERVICE_ENABLE),firmware:0:1:1:1)
+$(error Headless C6 radios require firmware, storage, workers and mailbox services)
+endif
+C6_SRCS += arch/esp32c6/tiku_irq_arch.c arch/esp32c6/tiku_cpu_arch.c kernel/cpu/tiku_common.c
+else
 ifneq ($(C6_PROFILE):$(TIKU_SHELL_ENABLE):$(C6_STORAGE):$(TIKU_THREADS_ENABLE),firmware:1:1:1)
 $(error C6 radios require firmware, shell, storage and workers enabled)
+endif
 endif
 ifneq ($(filter 1,$(TIKU_DRV_SDR_ESP_ENABLE)),)
 $(error The C6 radio profile excludes SDR)
