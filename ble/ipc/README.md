@@ -63,7 +63,15 @@ backpressure. Buffer backing remains owned until completion or cancellation.
 Wi-Fi, BLE and bulk streams use distinct logical endpoints on the same
 physical SDIO link.
 
-The controller profile supports one LE connection and one advertising set.
+The C6 and P4 host profiles support four LE connections and one advertising
+set. Named advertising restarts while a connection slot remains, retaining
+its primary and secondary PHY. Each link has its own ATT subscriptions,
+reassembly state and controller transmit credits. Notifications go to the
+subscribed links; `tiku_bt_notify_max()` reports the smallest active-link
+payload limit. Pairing runs on one link at a time because controller P-256
+completions have no connection identifier. Another pairing request receives
+busy; retry after the current pairing completes. Pending key completions
+from a disconnected link are discarded before another pairing starts.
 The shared host supports ATT MTU up to 247 and 1M, 2M and Coded connection
 PHY requests. `bt phy coded`, `bt phy coded-s2` and `bt phy coded-s8` select
 Coded with no coding preference, S=2, or S=8 for the local transmitter.
@@ -117,7 +125,7 @@ The mailbox CRC and claim generation do not authenticate an external peer.
 ## Checks
 
 ```sh
-make -C TikuBench/tests/host/kernel c6-ble c6-radio ipc-radio
+make -C TikuBench/tests/host/kernel bt-multi c6-ble c6-radio ipc-radio
 ```
 
 The tests exercise controller ABI layouts, shared RF and clock ownership,

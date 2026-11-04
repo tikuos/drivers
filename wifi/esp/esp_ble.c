@@ -264,7 +264,7 @@ static espb_coex_funcs_t espb_coex = {
     ._coex_schm_status_bit_clear = espb_coex_clear,
 };
 
-/** @brief Configure one connection, 255-byte ACL buffers and legacy advertising. */
+/** @brief Configure the host connection budget, ACL buffers and one advertising set. */
 static void espb_config(espb_config_t *c) {
 #if !defined(PLATFORM_ESP32C5) && !defined(PLATFORM_ESP32C6)
     tiku_esp32c61_clock_t clk;
@@ -292,10 +292,10 @@ static void espb_config(espb_config_t *c) {
     c->ble_scan_rsp_data_max_len = 251U;    /* IDF: 1650 */
     c->ble_ll_cfg_num_hci_cmd_pkts = 1U;
     c->ble_ll_ctrl_proc_timeout_ms = 40000U;
-    c->nimble_max_connections = 1U;     /* the host keeps one */
+    c->nimble_max_connections = TIKU_BT_CONN_MAX;
     c->ble_whitelist_size = 12U;
     c->ble_acl_buf_size = 255U;         /* IDF: 517 x 10 */
-    c->ble_acl_buf_count = 4U;
+    c->ble_acl_buf_count = 4U + 2U * (TIKU_BT_CONN_MAX - 1U);
     c->ble_hci_evt_buf_size = 257U;
     c->ble_multi_adv_instances = 1U;
     c->ble_ext_adv_max_size = 251U;     /* IDF: 1650 */

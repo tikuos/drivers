@@ -124,7 +124,7 @@ Add `TIKU_DRV_BLE_ESP_ENABLE=1` to the native shell/storage profile. The
 controller runs on TikuOS workers and provides in-memory HCI to the existing
 Bluetooth host. The shell provides `bt on`, `bt scan`, `bt list`,
 `bt advertise <name>`, `bt connect`, `bt connections` and `bt off`.
-The host supports one connection, legacy and extended advertising/scanning,
+The host supports four connections, legacy and extended advertising/scanning,
 ATT/GATT and the existing pairing API. Connected links accept `bt phy coded`,
 `bt phy coded-s2` and `bt phy coded-s8`; these request Coded PHY and a local
 transmit coding preference. The controller may override the preference.
