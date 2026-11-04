@@ -90,6 +90,12 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     }
 #endif
 
+#if defined(PLATFORM_ESP32C6) && (TIKU_DRV_154_C6_ENABLE + 0)
+    if ((radio == ESPW_RADIO_154 && core_radios != 0U) ||
+        (radio != ESPW_RADIO_154 && (core_radios & ESPW_RADIO_154)))
+        return -1;
+#endif
+
     if (core_radios == 0U && core_osi_started) {
         TIKU_PRINTF("[esp] previous radio workers still active; restart refused\n");
         return -1;
