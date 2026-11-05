@@ -132,7 +132,8 @@ typedef struct {
 } rx_slot_t;
 static rx_slot_t *rx_queue;
 static volatile uint8_t rx_head, rx_count, rx_streaming;
-static uint8_t rx_irq_attached;
+static uint8_t rx_irq_attached, rx_pending, rx_wait_ack;
+static tiku_clock_time_t rx_ack_until;
 static uint32_t rx_control;
 static uint16_t rx_pan, rx_address;
 static uint8_t cur_chan = TIKU_154_CHAN_MIN;
@@ -157,7 +158,7 @@ static uint8_t clamp(uint8_t channel)
 static void mac_stop(void)
 {
     if (rx_irq_attached) (void)tiku_c6_irq_enable(RX_IRQ_LINE, 0);
-    rx_streaming = rx_head = rx_count = 0;
+    rx_streaming = rx_head = rx_count = rx_pending = 0;
     TIKU_C6_REG_WRITE(ZB_EVENT_EN, EV_ALL);
     TIKU_C6_REG_WRITE(ZB_CMD, CMD_STOP);
     TIKU_C6_REG_WRITE(ZB_EVENT, EV_ALL);
@@ -185,7 +186,6 @@ static uint32_t wait_events(uint32_t events, uint32_t spins)
 /** @brief Arm one DMA reception with the retained filter and ACK settings. */
 static void stream_arm(void)
 {
-    TIKU_C6_REG_WRITE(ZB_CMD, CMD_STOP);
     TIKU_C6_REG_WRITE(ZB_EVENT, EV_ALL);
     rx_frame[0] = 0;
     TIKU_C6_REG_WRITE(ZB_RXDMA_ADDR, (uint32_t)(uintptr_t)rx_frame);
@@ -193,14 +193,23 @@ static void stream_arm(void)
     TIKU_C6_REG_WRITE(ZB_CMD, CMD_RX_START);
 }
 
-/** @brief Queue a complete frame, finish its hardware ACK, and rearm within capacity. */
+/** @brief Publish the captured frame after ACK completion or failure. */
+static void stream_finish(uint8_t ack)
+{
+    unsigned slot = (rx_head + rx_count) % RX_QUEUE_SIZE;
+    rx_queue[slot].ack = ack;
+    rx_pending = 0;
+    rx_count++;
+    if (rx_count < RX_QUEUE_SIZE) stream_arm();
+    else TIKU_C6_REG_WRITE(ZB_CMD, CMD_STOP);
+}
+
+/** @brief Capture receive events and complete hardware ACKs in separate interrupts. */
 static void stream_irq(void)
 {
     uint32_t event = TIKU_C6_REG_READ(ZB_EVENT);
-    if (!rx_streaming) {
-        TIKU_C6_REG_WRITE(ZB_EVENT, event);
-        return;
-    }
+    TIKU_C6_REG_WRITE(ZB_EVENT, event);
+    if (!rx_streaming || !(event & (EV_RX_DONE | EV_RX_ABORT | EV_ACK_TX_DONE))) return;
     if ((event & EV_RX_DONE) && rx_count < RX_QUEUE_SIZE) {
         uint8_t length = rx_frame[0] & 127u;
         if (length >= 2) {
@@ -208,17 +217,26 @@ static void stream_irq(void)
             rx_queue[slot].length = length - 2;
             rx_queue[slot].rssi = (int8_t)rx_frame[length - 1];
             memcpy(rx_queue[slot].frame, rx_frame + 1, length - 2);
-            rx_queue[slot].ack = 0;
-            if ((rx_control & CTRL_ACK_TX) && length >= 5 && (rx_frame[1] & 0x20)) {
-                rx_queue[slot].ack = !!(wait_events(EV_ACK_TX_DONE | EV_RX_ABORT, ACK_SPINS) & EV_ACK_TX_DONE);
-                if (rx_queue[slot].ack) tiku_cpu_c6_delay_us(ACK_SETTLE_US);
-            }
-            rx_count++;
+            rx_pending = 1;
+            rx_wait_ack = !!((rx_control & CTRL_ACK_TX) && length >= 5 && (rx_frame[1] & 0x20));
+            rx_ack_until = tiku_clock_time() + (TIKU_CLOCK_SECOND + 99u) / 100u;
         }
     }
-    TIKU_C6_REG_WRITE(ZB_CMD, CMD_STOP);
-    TIKU_C6_REG_WRITE(ZB_EVENT, EV_ALL);
-    if (rx_count < RX_QUEUE_SIZE) stream_arm();
+    if (rx_pending) {
+        if (!rx_wait_ack || (event & (EV_ACK_TX_DONE | EV_RX_ABORT)))
+            stream_finish(!!(event & EV_ACK_TX_DONE));
+    } else if ((event & (EV_RX_DONE | EV_RX_ABORT)) && rx_count < RX_QUEUE_SIZE) stream_arm();
+}
+
+/** @brief Recover an ACK whose completion and abort events did not arrive. */
+static void stream_ack_timeout(void)
+{
+    uint32_t irq = TIKU_C6_IRQ_SAVE();
+    if (rx_pending && !TIKU_CLOCK_LT(tiku_clock_time(), rx_ack_until)) {
+        TIKU_C6_REG_WRITE(ZB_CMD, CMD_STOP);
+        stream_finish(0);
+    }
+    TIKU_C6_IRQ_RESTORE(irq);
 }
 
 /** @brief Keep reception armed between mailbox calls; a full queue stops RF admission. */
@@ -242,7 +260,11 @@ int tiku_154_backend_receive(uint8_t *buf, uint8_t cap, uint32_t ms, int8_t *rss
         (void)tiku_c6_irq_enable(RX_IRQ_LINE, 1);
     }
     tiku_clock_time_t until = tiku_clock_time() + (ms * TIKU_CLOCK_SECOND + 999) / 1000;
-    while (!rx_count && TIKU_CLOCK_LT(tiku_clock_time(), until)) tiku_watchdog_kick();
+    do {
+        stream_ack_timeout();
+        if (rx_count || !TIKU_CLOCK_LT(tiku_clock_time(), until)) break;
+        tiku_watchdog_kick();
+    } while (1);
     uint32_t irq = TIKU_C6_IRQ_SAVE();
     int n = 0;
     if (rx_count) {

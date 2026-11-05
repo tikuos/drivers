@@ -44,6 +44,8 @@ sending the frame again. The service rejects changed requests with reused
 identifiers, stale claims, malformed lengths and out-of-range offsets.
 
 The C6 keeps reception armed between mailbox calls and queues 32 frames.
+Receive and ACK completion use separate interrupts. A cleared interrupt leaves
+an active reception intact; a missing ACK completion has a bounded timeout.
 The queue takes 4096 bytes from the shared radio heap while 802.15.4 is on;
 release returns those bytes before shutting down the shared radio core.
 When the queue fills, the receiver stops until the P4 consumes a frame; no
