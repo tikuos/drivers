@@ -63,8 +63,9 @@ backpressure. Buffer backing remains owned until completion or cancellation.
 Wi-Fi, BLE and bulk streams use distinct logical endpoints on the same
 physical SDIO link.
 
-The C6 and P4 host profiles support four LE connections and one advertising
-set. Named advertising restarts while a connection slot remains, retaining
+The C6 and P4 host profiles support four LE connections and four advertising
+sets. Set zero provides connectable GAP advertising; sets 1–3 are independent
+nonconnectable beacons. Named advertising restarts while a connection slot remains, retaining
 its primary and secondary PHY. Each link has its own ATT subscriptions,
 reassembly state and controller transmit credits. Notifications go to the
 subscribed links; `tiku_bt_notify_max()` reports the smallest active-link
@@ -80,6 +81,30 @@ Coded with no coding preference, S=2, or S=8 for the local transmitter.
 The controller may override that preference, and the peer chooses its own
 transmit coding. `bt connections` reports the negotiated PHY as `Coded`;
 HCI PHY completion events do not distinguish S=2 from S=8.
+`TIKU_BT_ADV_SET_MAX` sets the host and native controller budget, from 1 to 4.
+`tiku_bt_advertising_sets()` also checks the connected controller's limit.
+`tiku_bt_advertise_set()` accepts a handle from 1 to that limit minus one,
+primary and secondary PHYs, an interval and up to 251 bytes of AD records.
+`tiku_bt_advertise_set_stop()` stops one handle; stopping set zero leaves the
+beacons running. Invalid requests and failed stops preserve running state;
+after disabling succeeds, a setup failure leaves that set disabled.
+Each beacon has an independent static random address derived from the device
+identity and handle. With privacy enabled, each uses an RPA and rotates at
+the configured interval. An address-update failure leaves its set disabled;
+other sets retain their state. Connection completion and disconnect recovery
+on set zero do not restart the independent sets.
+
+```text
+bt on
+bt advertise TikuP4
+bt advset 1 SensorOne 1m 2m
+bt advset 2 SensorCoded coded coded
+bt advset 3 SensorThree 1m
+bt advset
+bt advset 1 stop
+bt privacy on 10
+```
+
 Discovery supports legacy PDUs and extended advertising with 1M or Coded
 primary PHYs; secondary advertising supports 1M, 2M or Coded. Coded links
 start through Coded discovery and retain that PHY after connection.
