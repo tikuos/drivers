@@ -51,6 +51,7 @@ extern const int8_t *bt_bb_get_tx_pwr_table(uint8_t *length);
 #define ZB_EVENT_EN    (ZB_BASE + 0x060u)
 #define ZB_EVENT       (ZB_BASE + 0x064u)
 #define ZB_RX_ABORT_EN (ZB_BASE + 0x068u)
+#define ZB_PENDING_CFG (ZB_BASE + 0x06Cu)
 #define ZB_PTI         (ZB_BASE + 0x070u)
 #define ZB_RX_STATUS   (ZB_BASE + 0x080u)
 #define ZB_TX_STATUS   (ZB_BASE + 0x084u)
@@ -211,6 +212,8 @@ static void stream_irq(void)
     TIKU_C6_REG_WRITE(ZB_EVENT, event);
     if (!rx_streaming || !(event & (EV_RX_DONE | EV_RX_ABORT | EV_ACK_TX_DONE))) return;
     if ((event & EV_RX_DONE) && rx_count < RX_QUEUE_SIZE) {
+        /* Writing the pending decision releases the hardware ACK turnaround. */
+        field(ZB_PENDING_CFG, 1u, 0u);
         uint8_t length = rx_frame[0] & 127u;
         if (length >= 2) {
             unsigned slot = (rx_head + rx_count) % RX_QUEUE_SIZE;
@@ -532,6 +535,7 @@ static int receive(uint32_t ctrl, uint8_t *buf, uint8_t cap,
     }
     /* A frame that asked for an ACK and passed the filter gets one from the
      * MAC block within the turnaround; stopping earlier would cut it off. */
+    field(ZB_PENDING_CFG, 1u, 0u);
     len = (uint8_t)(rx_frame[0] & 0x7Fu);
     if (did_ack) {
         *did_ack = (ctrl & CTRL_ACK_TX) && len >= 3u && (rx_frame[1] & 0x20u) &&
