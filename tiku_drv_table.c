@@ -22,6 +22,10 @@
 
 #include "kernel/drivers/tiku_drv.h"
 
+#if TIKU_DRV_INPUT_GT1151_ENABLE
+extern const tiku_drv_t tiku_drv_input_gt1151;
+#endif
+
 #if TIKU_DRV_PHY_C5_ENABLE
 extern const tiku_drv_t tiku_drv_phy_c5;
 #endif
@@ -62,6 +66,9 @@ extern const tiku_drv_t tiku_drv_sensor_temperature_mcp9808;
 /*---------------------------------------------------------------------------*/
 
 const tiku_drv_t *const tiku_drv_table[] = {
+#if TIKU_DRV_INPUT_GT1151_ENABLE
+    &tiku_drv_input_gt1151,
+#endif
 #if TIKU_DRV_PHY_C5_ENABLE
     &tiku_drv_phy_c5,
 #endif
