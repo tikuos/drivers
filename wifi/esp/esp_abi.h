@@ -190,6 +190,9 @@ typedef struct {
     int (*_coex_schm_flexible_period_set)(uint8_t period);
     uint8_t (*_coex_schm_flexible_period_get)(void);
     void *(*_coex_schm_get_phase_by_idx)(int phase_idx);
+#if defined(PLATFORM_ESP32S31)
+    int (*_coex_configure_preemption_end_cb)(bool is_register, int (*cb)(uint32_t));
+#endif
     bool (*_wifi_disable_ac_ax)(void);
     int32_t (*_wifi_bb_sleep_retention_attach)(void);
     int32_t (*_wifi_bb_sleep_retention_detach)(void);
@@ -269,7 +272,16 @@ typedef struct {
 /* Measured from IDF's definitions for RV32 (temp/esp32c61/abicheck); a host
  * analysis, with its wider pointers, has nothing to compare. */
 #if defined(__riscv) && __riscv_xlen == 32
+#if defined(PLATFORM_ESP32S31)
+_Static_assert(sizeof(wifi_osi_funcs_t) == 512, "S31 OS adapter size");
+_Static_assert(offsetof(wifi_osi_funcs_t, _coex_configure_preemption_end_cb) == 484, "S31 coex");
+_Static_assert(offsetof(wifi_osi_funcs_t, _wifi_disable_ac_ax) == 488, "S31 osi");
+_Static_assert(offsetof(wifi_osi_funcs_t, _magic) == 508, "S31 osi");
+#else
 _Static_assert(sizeof(wifi_osi_funcs_t) == 508, "OS adapter size");
+_Static_assert(offsetof(wifi_osi_funcs_t, _wifi_disable_ac_ax) == 484, "osi");
+_Static_assert(offsetof(wifi_osi_funcs_t, _magic) == 504, "osi");
+#endif
 _Static_assert(offsetof(wifi_osi_funcs_t, _semphr_create) == 52, "osi");
 _Static_assert(offsetof(wifi_osi_funcs_t, _task_create) == 148, "osi");
 _Static_assert(offsetof(wifi_osi_funcs_t, _phy_enable) == 212, "osi");
@@ -280,8 +292,6 @@ _Static_assert(offsetof(wifi_osi_funcs_t, _malloc_internal) == 344, "osi");
 _Static_assert(offsetof(wifi_osi_funcs_t, _coex_init) == 384, "osi");
 _Static_assert(offsetof(wifi_osi_funcs_t,
                         _regdma_link_set_write_wait_content) == 464, "osi");
-_Static_assert(offsetof(wifi_osi_funcs_t, _wifi_disable_ac_ax) == 484, "osi");
-_Static_assert(offsetof(wifi_osi_funcs_t, _magic) == 504, "osi");
 _Static_assert(sizeof(wpa_crypto_funcs_t) == 52, "crypto table size");
 _Static_assert(sizeof(wifi_init_config_t) == 160, "init config size");
 _Static_assert(offsetof(wifi_init_config_t, feature_caps) == 128, "init");

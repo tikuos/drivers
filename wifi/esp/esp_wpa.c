@@ -12,7 +12,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#if defined(PLATFORM_ESP32S31)
+#include <arch/esp32s31/tiku_trng_arch.h>
+#else
 #include <arch/esp32c61/tiku_trng_arch.h>
+#endif
 #include <tikukits/crypto/aeskw/tiku_kits_crypto_aeskw.h>
 #include <tikukits/crypto/hmac/tiku_kits_crypto_hmac_sha1.h>
 #include "esp_heap.h"

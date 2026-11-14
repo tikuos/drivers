@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include <kernel/memory/tiku_mem.h>
-#if defined(PLATFORM_ESP32C6)
+#if defined(PLATFORM_ESP32C6) || defined(PLATFORM_ESP32S31)
 #include "esp_arch.h"
 #elif defined(PLATFORM_ESP32C5)
 #include <arch/esp32c5/tiku_psram_arch.h>
@@ -53,7 +53,7 @@ static const char *core_name(uint8_t radio) {
 /** @brief Packet buffers' block from the PSRAM tier, bringing PSRAM up if
  *         it is not yet; without it they come from SRAM, as before. */
 static void core_ext_take(uint32_t bytes) {
-#if defined(PLATFORM_ESP32C6)
+#if defined(PLATFORM_ESP32C6) || defined(PLATFORM_ESP32S31)
     (void)bytes;
 #else
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
@@ -81,6 +81,9 @@ static void core_ext_take(uint32_t bytes) {
 
 int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
+#if defined(PLATFORM_ESP32S31)
+    if (radio != ESPW_RADIO_WIFI || ext_bytes != 0) return -1;
+#endif
 
 #if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0) && defined(PLATFORM_ESP32C61)
     if ((radio != ESPW_RADIO_SDR && tiku_drv_sdr_tx_esp_held()) ||
@@ -138,8 +141,12 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     if (ext_bytes != 0U && !core_ext_taken) {
         core_ext_take(ext_bytes);
     }
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32C5) || defined(PLATFORM_ESP32S31)
+#if defined(PLATFORM_ESP32S31)
+    if (espw_s31_radio_prepare() != 0) {
+#else
     if (espw_c5_radio_prepare() != 0) {
+#endif
         core_radios = radio;
         espw_core_down(radio);
         return -1;
@@ -170,6 +177,9 @@ void espw_core_down(uint8_t radio) {
     if (ended) { core_osi_started = 0U; }
 #if defined(PLATFORM_ESP32C6)
     if (ended) { espw_c6_radio_release(); }
+#endif
+#if defined(PLATFORM_ESP32S31)
+    if (ended) { espw_s31_radio_release(); }
 #endif
 #if defined(PLATFORM_ESP32C5)
     if (ended) { espw_c5_radio_release(); }

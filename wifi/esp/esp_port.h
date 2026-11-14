@@ -25,6 +25,11 @@
 #undef TIKU_PRINTF
 #define TIKU_PRINTF(...) espw_c6_log(__VA_ARGS__)
 #endif
+#if defined(PLATFORM_ESP32S31)
+#include "s31/wifi_s31_arch.h"
+#undef TIKU_PRINTF
+#define TIKU_PRINTF(...) espw_s31_log(__VA_ARGS__)
+#endif
 
 #define ESPW_PRINTF(...) TIKU_PRINTF("[esp-wifi] " __VA_ARGS__)
 #define ESPB_PRINTF(...) TIKU_PRINTF("[esp-ble] " __VA_ARGS__)

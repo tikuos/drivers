@@ -23,6 +23,8 @@
 #include <services/ipc/tiku_ipc_radio.h>
 #include <interfaces/wireless/tiku_wireless_ipc.h>
 #define RADIO_OWNER_CHECK() do { if(!tiku_radio_local_allowed())return TIKU_DRV_ERR_TIMEOUT; } while(0)
+#elif TIKU_ESP_PROFILE_ENABLE
+#define RADIO_OWNER_CHECK() do { if(espw_s31_profile_busy() || espw_arch_in_isr() || !tiku_thread_in_kernel())return TIKU_DRV_ERR_TIMEOUT; } while(0)
 #else
 #define RADIO_OWNER_CHECK() do { } while(0)
 #endif
@@ -30,6 +32,9 @@
 #include "tiku_drv_wifi_esp.h"
 #include "esp_heap.h"
 #include "esp_port.h"
+#if TIKU_ESP_PROFILE_ENABLE
+#include "s31/wifi_s31_profile.h"
+#endif
 #if TIKU_ESP_SAE_ENABLE
 #include "esp_sae.h"
 #endif
@@ -75,6 +80,8 @@ static void espw_ap_configure(wifi_config_t *cfg, const uint8_t *pmk);
 #ifndef TIKU_DRV_WIFI_ESP_HEAP_BYTES
 #if (TIKU_DRV_SDR_ESP_ENABLE + 0)
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (32U * 1024U)
+#elif defined(PLATFORM_ESP32S31)
+#define TIKU_DRV_WIFI_ESP_HEAP_BYTES (64U * 1024U)
 #elif defined(PLATFORM_ESP32C5)
 #define TIKU_DRV_WIFI_ESP_HEAP_BYTES (64U * 1024U)
 #else
@@ -231,7 +238,7 @@ void espw_event(const char *base, int32_t id, const void *data, size_t len) {
 /* Scanning                                                                  */
 /*---------------------------------------------------------------------------*/
 
-/** @brief Scan permitted channels; C5 listens passively, C61 uses active probes. */
+/** @brief Scan permitted channels; C5 and S31 listen passively. */
 static void espw_scan_begin(void) {
     esp_err_t rc;
 
@@ -240,7 +247,7 @@ static void espw_scan_begin(void) {
     }
     espw_scanning = 1U;
     espw_scan_start = tiku_clock_time();
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32C5) || defined(PLATFORM_ESP32S31)
     const wifi_scan_config_t scan = {.show_hidden = true, .scan_type = 1,
                                      .scan_time = {.passive = 360}};
     rc = esp_wifi_scan_start(&scan, false);
@@ -543,6 +550,10 @@ static void espw_join_begin(void) {
     espw_join_configure(&cfg);
 }
 
+#if defined(PLATFORM_ESP32S31)
+static esp_err_t espw_rx(void *buffer, uint16_t len, void *eb);
+#endif
+
 /** @brief The station has joined: the handshake (if any) is done. */
 static void espw_join_up(void) {
 #if TIKU_WIRELESS_AP_ENABLE
@@ -551,6 +562,18 @@ static void espw_join_up(void) {
     if (espw_link != TIKU_WIRELESS_LINK_CONNECTING) {
         return;                 /* left since, or a repeat */
     }
+#if defined(PLATFORM_ESP32S31)
+    /* The S31 station receive interface becomes available on connection. */
+    int rc = esp_wifi_internal_reg_rxcb(WIFI_IF_STA, espw_rx);
+    if (rc != ESP_OK) {
+        espw_link_raw = (uint32_t)rc;
+        espw_link = TIKU_WIRELESS_LINK_FAILED;
+        (void)esp_wifi_disconnect_internal();
+        (void)tiku_process_post(TIKU_PROCESS_BROADCAST, TIKU_WIRELESS_EVT_LINK_DOWN,
+                               (tiku_event_data_t)(uintptr_t)rc);
+        return;
+    }
+#endif
     espw_link = TIKU_WIRELESS_LINK_JOINED;
     espw_tries = 0U;
     espw_join_ticks = (uint32_t)(tiku_clock_time_t)(tiku_clock_time() -
@@ -746,6 +769,8 @@ static void espw_config(wifi_init_config_t *c) {
 #if TIKU_ESP_SAE_ENABLE
     c->feature_caps = 1u;
     c->wifi_task_stack_size = 6144;
+#elif defined(PLATFORM_ESP32S31)
+    c->wifi_task_stack_size = 4096;
 #else
     c->wifi_task_stack_size = 3072;
 #endif
@@ -815,13 +840,27 @@ static int espw_power_up(void) {
     if (rc == ESP_OK) {
         rc = esp_wifi_start();
     }
+#if defined(PLATFORM_ESP32S31)
+    /* S31 has no modem-sleep ownership or wakeup integration. */
+    if (rc == ESP_OK) {
+        extern esp_err_t esp_wifi_set_ps(int type);
+        rc = esp_wifi_set_ps(0);
+#if TIKU_S31_WIFI_ENABLE
+        extern esp_err_t esp_wifi_set_country_code(const char *country, bool ieee80211d);
+        if (rc == ESP_OK) rc = esp_wifi_set_country_code(TIKU_S31_WIFI_COUNTRY, false);
+#endif
+        if (rc != ESP_OK) (void)esp_wifi_stop();
+    }
+#endif
     if (rc != ESP_OK) {
         ESPW_PRINTF("start: 0x%lx\n", (unsigned long)rc);
         espw_teardown(3);
         return TIKU_DRV_ERR_INIT;
     }
     (void)esp_wifi_get_mac(WIFI_IF_STA, espw_mac);
+#if !defined(PLATFORM_ESP32S31)
     (void)esp_wifi_internal_reg_rxcb(WIFI_IF_STA, espw_rx);
+#endif
     espw_up = 1U;
     espw_arch_sleep_hold(1);        /* the modem runs on the PLL */
 
@@ -891,8 +930,8 @@ static int espw_power_down(void) {
 /* The wireless interface                                                    */
 /*---------------------------------------------------------------------------*/
 
-int tiku_wireless_power(uint8_t on) {
-    RADIO_OWNER_CHECK();
+/** @brief Apply a power transition after the public ownership check. */
+static int espw_power(uint8_t on) {
     if (!espw_ready) {
         return TIKU_DRV_ERR_NOT_PRESENT;
     }
@@ -901,6 +940,17 @@ int tiku_wireless_power(uint8_t on) {
     }
     return on ? espw_power_up() : espw_power_down();
 }
+
+int tiku_wireless_power(uint8_t on) {
+    RADIO_OWNER_CHECK();
+    return espw_power(on);
+}
+#if TIKU_ESP_PROFILE_ENABLE
+int espw_s31_profile_power(uint8_t on) {
+    if (espw_arch_in_isr() || !tiku_thread_in_kernel()) return TIKU_DRV_ERR_TIMEOUT;
+    return espw_power(on);
+}
+#endif
 
 int tiku_wireless_status(tiku_wireless_status_t *out) {
     int rssi = 0;
@@ -965,6 +1015,9 @@ int tiku_wireless_connect_auth(const char *ssid, const char *psk,
                                tiku_wireless_auth_t auth) {
     RADIO_OWNER_CHECK();
     size_t slen, plen;
+#if TIKU_ESP_PROFILE_ENABLE
+    if (espw_s31_profile_busy()) return TIKU_DRV_ERR_TIMEOUT;
+#endif
 
     if (!espw_up || ssid == NULL || psk == NULL ||
 #if TIKU_WIRELESS_AP_ENABLE
@@ -1000,6 +1053,9 @@ int tiku_wireless_connect_auth(const char *ssid, const char *psk,
         memset(espw_want_psk, 0, sizeof espw_want_psk);
         return TIKU_DRV_ERR_TIMEOUT;
     }
+#if TIKU_ESP_PROFILE_ENABLE
+    espw_s31_profile_remember(ssid, psk, auth, 0, 0);
+#endif
     return TIKU_DRV_OK;
 }
 
@@ -1025,9 +1081,12 @@ int tiku_wireless_disconnect(void) {
                              NULL) ? TIKU_DRV_OK : TIKU_DRV_ERR_TIMEOUT;
 }
 
-/* Nothing is kept across boots: forgetting is leaving. */
+/* Forgetting stops the requested connection and erases an enabled profile store. */
 int tiku_wireless_forget(void) {
     RADIO_OWNER_CHECK();
+#if TIKU_ESP_PROFILE_ENABLE
+    return espw_s31_profile_forget();
+#else
 #if TIKU_WIRELESS_AP_ENABLE
     if (espw_ap_mode) {
         int rc = tiku_wireless_ap_stop();
@@ -1038,9 +1097,11 @@ int tiku_wireless_forget(void) {
         (void)tiku_wireless_disconnect();
     }
     return TIKU_DRV_OK;
+#endif
 }
 
-/* No profile is saved, so there is none to describe. */
+/* Builds without profile storage return NOT_PRESENT. */
+#if !TIKU_ESP_PROFILE_ENABLE
 int tiku_wireless_saved_profile(tiku_wireless_saved_profile_t *out) {
     if (out == NULL) {
         return TIKU_DRV_ERR_INVALID;
@@ -1048,6 +1109,8 @@ int tiku_wireless_saved_profile(tiku_wireless_saved_profile_t *out) {
     memset(out, 0, sizeof *out);
     return TIKU_DRV_ERR_NOT_PRESENT;
 }
+
+#endif
 
 int tiku_wireless_tx_eth(const uint8_t *frame, uint16_t len) {
     RADIO_OWNER_CHECK();
@@ -1199,6 +1262,9 @@ int tiku_wireless_ap_start_auth(const char *ssid, const char *psk, uint8_t chann
                                 tiku_wireless_auth_t auth)
 {
     RADIO_OWNER_CHECK();
+#if TIKU_ESP_PROFILE_ENABLE
+    if (espw_s31_profile_busy()) return TIKU_DRV_ERR_TIMEOUT;
+#endif
     if (!espw_up || !ssid || !psk || channel < 1 || channel > 11)
         return TIKU_DRV_ERR_INVALID;
     size_t sl = strnlen(ssid, 33), pl = strnlen(psk, 64);
@@ -1260,6 +1326,9 @@ int tiku_wireless_ap_start_auth(const char *ssid, const char *psk, uint8_t chann
               (const uint8_t *)ssid, sl, ESPW_PSK_ROUNDS, pmk, sizeof pmk);
     espw_ap_configure(&cfg, pl ? pmk : NULL);
     memset(pmk, 0, sizeof pmk);
+#endif
+#if TIKU_ESP_PROFILE_ENABLE
+    espw_s31_profile_remember(ssid, psk, auth, 1, channel);
 #endif
     return TIKU_DRV_OK;
 }

@@ -947,6 +947,8 @@ static uint32_t osi_rand(void) {
     if (espw_c6_random((uint8_t *)&v, sizeof(v)) != 0) { abort(); }
 #elif defined(PLATFORM_ESP32C5)
     if (espw_c5_random((uint8_t *)&v, sizeof(v)) != 0) { abort(); }
+#elif defined(PLATFORM_ESP32S31)
+    if (espw_s31_random((uint8_t *)&v, sizeof(v)) != 0) { abort(); }
 #else
     (void)tiku_trng_arch_read_u32(&v);
 #endif
@@ -962,6 +964,8 @@ static int osi_get_random(uint8_t *buf, size_t len) {
     return espw_c6_random(buf, len);
 #elif defined(PLATFORM_ESP32C5)
     return espw_c5_random(buf, len);
+#elif defined(PLATFORM_ESP32S31)
+    return espw_s31_random(buf, len);
 #else
     return tiku_trng_arch_read_bytes(buf, len) == 0 ? 0 : -1;
 #endif
@@ -1239,6 +1243,15 @@ static void *osi_retention_link(int id) {
     return NULL;
 }
 
+#if defined(PLATFORM_ESP32S31)
+#if ESPW_COEX
+#error "S31 coexistence requires its preemption callback binding"
+#endif
+/** @brief No preemption callback is needed with the coexistence arbiter disabled. */
+static int osi_s31_preemption(bool is_register, int (*cb)(uint32_t))
+{ (void)is_register; (void)cb; return ESP_OK; }
+#endif
+
 wifi_osi_funcs_t espw_osi_funcs = {
     ._version = ESP_WIFI_OS_ADAPTER_VERSION,
     ._env_is_chip = osi_true,
@@ -1373,6 +1386,9 @@ wifi_osi_funcs_t espw_osi_funcs = {
     ._coex_schm_get_phase_by_idx = OSI_COEX(osi_coex_phase,
                                             coex_schm_get_phase_by_idx),
     ._wifi_disable_ac_ax = osi_false,
+#if defined(PLATFORM_ESP32S31)
+    ._coex_configure_preemption_end_cb = osi_s31_preemption,
+#endif
     ._wifi_bb_sleep_retention_attach = osi_one,
     ._wifi_bb_sleep_retention_detach = osi_one,
     ._wifi_mac_sleep_retention_attach = osi_one,

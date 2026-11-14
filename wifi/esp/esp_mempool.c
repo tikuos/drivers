@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 #include "esp_arch.h"
-#include "esp_ble_abi.h"
+#include "esp_mempool.h"
 
 #define POOL_ALIGN      4U
 

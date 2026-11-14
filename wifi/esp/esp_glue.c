@@ -16,7 +16,7 @@
 
 #include <hal/tiku_printf_hal.h>
 #include "esp_abi.h"
-#if defined(PLATFORM_ESP32C6)
+#if defined(PLATFORM_ESP32C6) || defined(PLATFORM_ESP32S31)
 #include "esp_port.h"
 #endif
 #if defined(PLATFORM_ESP32C5)
@@ -97,6 +97,7 @@ void __assert_func(const char *file, int line, const char *func,
     __builtin_trap();
 }
 
+#if !defined(PLATFORM_ESP32S31)
 void abort(void) {
     TIKU_PRINTF("[esp-wifi] abort from 0x%08lx\n",
                 (unsigned long)(uintptr_t)__builtin_return_address(0));
@@ -111,6 +112,8 @@ uint32_t rtc_clk_xtal_freq_get(void) {
     return 40U;
 #endif
 }
+
+#endif
 
 /** @brief Hex text to bytes, two digits each; -1 on a stray character. */
 int hexstr2bin(const char *hex, uint8_t *buf, size_t len) {
