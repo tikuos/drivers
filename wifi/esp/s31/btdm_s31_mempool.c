@@ -41,3 +41,6 @@ os_error_t e_btdm_memblock_put(struct os_mempool *mp, void *block)
 { return os_memblock_put(mp, block); }
 os_error_t e_btdm_memblock_put_from_cb(struct os_mempool *mp, void *block)
 { return os_memblock_put_from_cb(mp, block); }
+
+os_error_t e_btdm_mempool_deinit_all(bool controller)
+{ return espb_mempool_unregister_controller(controller); }

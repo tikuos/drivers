@@ -229,3 +229,18 @@ os_error_t os_memblock_put_from_cb(struct os_mempool *mp, void *block) {
 int os_memblock_from(const struct os_mempool *mp, const void *block) {
     return mp != NULL && pool_owns(mp, block);
 }
+
+os_error_t espb_mempool_unregister_controller(int controller) {
+    uint32_t state = espw_arch_mie_off();
+    int found = 0;
+    for (struct os_mempool **p = &pool_list; *p;) {
+        struct os_mempool *mp = *p;
+        if (!!(mp->mp_flags & 0x10u) == !!controller) {
+            *p = mp->mp_next;
+            mp->mp_next = NULL;
+            found = 1;
+        } else p = &mp->mp_next;
+    }
+    espw_arch_mie_restore(state);
+    return found ? OS_OK : OS_INVALID_PARM;
+}

@@ -82,7 +82,12 @@ static void core_ext_take(uint32_t bytes) {
 int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     tiku_mem_request_t req = TIKU_MEM_REQUEST_DEFAULT;
 #if defined(PLATFORM_ESP32S31)
-    if (radio != ESPW_RADIO_WIFI || ext_bytes != 0) return -1;
+    if (radio != ESPW_RADIO_WIFI
+#if TIKU_S31_BLE_ENABLE
+        && radio != ESPW_RADIO_BLE
+#endif
+    ) return -1;
+    if (ext_bytes != 0 || core_radios) return -1;
 #endif
 
 #if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0) && defined(PLATFORM_ESP32C61)

@@ -156,12 +156,71 @@ SAE authentication and PMF exchanges with an independent peer remain
 unqualified. Modem sleep, graphical network settings and concurrent
 audio/display/storage traffic remain outside this profile.
 
-`btdm_s31_osal.c` supplies the BTDM worker, interrupt, allocator and NPL
-callbacks. `btdm_s31_mempool.c` binds eleven packet-pool entry points to the
-shared fixed-block allocator. Its profile uses caller-owned storage with
-runtime pool allocation disabled. This does not provide a BLE controller or HCI transport.
-Controller configuration, the SDK broker, clock/PHY ownership, buffer
-pools, HCI traffic and advertising/scanning/connection recovery remain.
-Controller libraries contain weak callback implementations; a future
-controller image must verify that required callbacks resolve to the native
-adapters rather than treating link success as qualification.
+## BLE controller and host
+
+`S31_BLE_ENABLE=1` adds the native BTDM controller, bounded HCI transport,
+TikuKits BLE host and `bt` commands to the normal firmware profile. The
+controller and Wi-Fi share exclusive PHY ownership. Stop one radio before
+starting the other. Modem sleep is disabled while BLE is on.
+
+The build requires an external ESP-IDF source tree at
+`4d59230ddff16327812782151ef0afef202dc6d7` and the `libble_app.a` and
+`libbtdm_common.a` archives from `esp32s31-bt-lib` revision
+`10c507788e9da0993709cf82e405c896561172d8`. `ble_assets.json` records the
+required input hashes; the build refuses missing or changed inputs.
+The Bluetooth controller archives are not distributed here. Their
+redistribution terms remain unresolved in the port's asset audit.
+
+```sh
+make MCU=esp32s31 S31_PROFILE=firmware S31_BLE_ENABLE=1 \
+    S31_BT_IDF=/path/to/esp-idf S31_BT_LIB_DIR=/path/to/esp32s31-bt-lib
+```
+
+```text
+wifi off
+bt on
+bt scan
+bt list
+bt scan stop
+bt connect 1
+bt conns
+bt discover
+bt phy 2m
+bt phy coded-s8
+bt pair
+bt disconnect
+bt advertise-ext TikuS31 coded coded
+bt advertise stop
+bt off
+```
+
+The host supports central and peripheral roles, legacy and extended
+advertising/scanning, 1M/2M/Coded PHYs, GATT client/server operations and
+LE Secure Connections. It uses the S31 health-checked random source and
+software P-256 when the controller lacks that HCI operation. The profile
+budgets two connections and two advertising sets. One external C5 peer
+has qualified each connection role; two simultaneous links require further
+hardware qualification.
+
+The controller uses a 56 KiB SRAM heap and a 4096-byte receive ring. HCI
+lengths are checked before allocation. Buffer exhaustion returns an error;
+receive overflow latches a transport fault cleared by `bt off` followed by
+`bt on`. A failed controller shutdown retains radio ownership; another
+`bt off` retries teardown. The host scratch arena has fixed placement so radio heap release
+does not leave it between free SRAM ranges. The linker places foreground
+cryptography and BLE host code in flash while retaining vendor IRAM sections
+in SRAM. The firmware mapping has room for 1 MiB of mapped code.
+
+`btdm_s31_osal.c` supplies native workers, interrupts and NPL callbacks.
+`btdm_s31_mempool.c` binds packet pools and selective controller-pool teardown
+to the shared allocator. The BLE adapter reserves additional bounded NPL
+objects used outside the SDK's reported counts. Controller configuration
+size and field offsets are checked at compile time.
+
+C5 peer tests cover discovery, connections in both roles, GATT reads and
+writes, 2M/Coded PHY transitions, Coded discovery and encrypted pairing.
+The negotiated limits are a 247-byte ATT MTU and 251-byte link-layer packets.
+The C5 received and checked 4096 notification bytes over a Coded connection.
+BLE shutdown, Wi-Fi startup and scanning, then BLE restart passed in one boot.
+Long-duration traffic, cold power cycles, simultaneous links, sleep current
+and concurrent Wi-Fi/BLE operation are outside this qualification.

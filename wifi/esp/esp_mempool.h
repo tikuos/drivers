@@ -30,4 +30,9 @@ os_error_t os_memblock_put(struct os_mempool *mp, void *block);
 os_error_t os_memblock_put_from_cb(struct os_mempool *mp, void *block);
 /** @brief Test membership, including interior addresses for combination pools. */
 int os_memblock_from(const struct os_mempool *mp, const void *block);
+/** @brief Unregister pools with the selected BTDM controller flag (bit 4).
+ * The caller owns pool storage. Return OS_OK if a pool was removed, or
+ * OS_INVALID_PARM if no pool matched. Outstanding blocks must be reclaimed.
+ */
+os_error_t espb_mempool_unregister_controller(int controller);
 #endif

@@ -91,5 +91,10 @@ int espw_read_mac(uint8_t *mac, unsigned type)
 int espw_arch_xip_ok(void)
 {
     uintptr_t address = (uintptr_t)esp_wifi_init_internal;
-    return address >= 0x40020020u && address < 0x400a0000u;
+    return address >= 0x40020020u && address <
+#if TIKU_S31_BLE_ENABLE
+        0x40120000u;
+#else
+        0x400a0000u;
+#endif
 }

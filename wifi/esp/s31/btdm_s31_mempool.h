@@ -32,4 +32,8 @@ void *e_btdm_memblock_get(struct os_mempool *mp);
 os_error_t e_btdm_memblock_put(struct os_mempool *mp, void *block);
 /** @brief Return a block directly from an extended-pool callback. */
 os_error_t e_btdm_memblock_put_from_cb(struct os_mempool *mp, void *block);
+/** @brief Unregister pools matching the controller flag; storage remains caller-owned.
+ * Return OS_OK if a pool was removed, or OS_INVALID_PARM if none matched.
+ */
+os_error_t e_btdm_mempool_deinit_all(bool controller);
 #endif
