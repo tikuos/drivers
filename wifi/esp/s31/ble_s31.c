@@ -23,6 +23,7 @@
 extern int espw_core_up(uint8_t radio, uint32_t bytes, uint32_t external);
 extern void espw_core_down(uint8_t radio);
 extern int espw_core_idle(void);
+extern uint8_t espw_core_radios(void);
 extern void espw_delay_ms(uint32_t ms);
 extern const char *ble_controller_get_compile_version(void);
 _Static_assert(offsetof(esp_bt_ctrl_le_config_t, config_magic) == 116,
@@ -183,7 +184,12 @@ static int power_down(void)
         esp_bt_controller_deinit()) return TIKU_DRV_ERR_INIT;
     espw_core_down(BLE_RADIO);
     dropped = 0;
+#if TIKU_S31_RADIO_COEX
+    if ((espw_core_radios() & BLE_RADIO) ||
+        (!espw_core_radios() && !espw_core_idle())) return TIKU_DRV_ERR_INIT;
+#else
     if (!espw_core_idle()) return TIKU_DRV_ERR_INIT;
+#endif
     owned = 0;
     return 0;
 }
@@ -196,7 +202,11 @@ int tiku_bt_controller_power(uint8_t on)
     if ((!on && !owned) || (on && active && !dropped)) return 0;
     changing = 1;
     if (!on) result = power_down();
+#if TIKU_S31_RADIO_COEX
+    else if (espw_core_radios() & ~1u) result = TIKU_DRV_ERR_TIMEOUT;
+#else
     else if (!espw_core_idle()) result = TIKU_DRV_ERR_TIMEOUT;
+#endif
     else {
         esp_bt_controller_config_t config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
         result = espw_core_up(BLE_RADIO, 56u * 1024u, 0);

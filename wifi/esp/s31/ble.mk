@@ -51,6 +51,15 @@ S31_LIBS += $(S31_BT_LIB_DIR)/libbtdm_common.a \
 S31_LDFLAGS += -Wl,--defsym=S31_BLE=1
 S31_LDFLAGS += -Wl,--wrap=btdm_osal_elem_mempool_init
 
+ifeq ($(S31_RADIO_COEX),1)
+S31_FLAGS += -DTIKU_S31_RADIO_COEX=1 -DTIKU_DRV_WIFI_ESP_PSRAM_BYTES=0
+S31_BT_INCLUDES += -I$(S31_BT_IDF)/components/esp_coex/include \
+    -I$(S31_BT_IDF)/components/esp_hal_gpio/include \
+    -I$(S31_BT_IDF)/components/esp_hal_gpio/esp32s31/include
+S31_SRCS += drivers/wifi/esp/esp_coex.c
+S31_LIBS += drivers/wifi/esp/s31/vendor/libcoexist.a
+endif
+
 S31_FLAGS += -DTIKU_BT_HOST=1 -DTIKU_BT_ON_DEMAND=1
 S31_SRCS += tikukits/net/bluetooth/tiku_bt.c interfaces/bluetooth/tiku_ble_adv.c interfaces/bluetooth/tiku_ble_serial.c shell/commands/tiku_shell_cmd_bt.c
 $(S31_DIR)/tikukits/net/bluetooth/tiku_bt.o: S31_FLAGS += -DTIKU_BT_PRINTF=printf -include stdio.h -Wno-unused-function

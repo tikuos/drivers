@@ -10,6 +10,12 @@
 #include <arch/esp32s31/tiku_trng_arch.h>
 #define REG(a) (*(volatile uint32_t *)(uintptr_t)(a))
 static uint32_t saved_trust, saved_wifi_clock, track_timer[5];
+#if TIKU_S31_RADIO_COEX
+static const uint32_t shared_clocks[] = {
+    0x20109c04u, 0x20109c14u, 0x2010f004u, 0x2010f008u, 0x2010f018u
+};
+static uint32_t saved_shared[sizeof shared_clocks / sizeof shared_clocks[0]];
+#endif
 static void *phy_lock;
 static unsigned prepared, inited, wifi_on, fresh;
 /** @brief Track PHY parameters from the radio timer worker. */
@@ -27,6 +33,10 @@ int espw_s31_radio_prepare(void)
     if ((saved_trust & 4u) && (saved_trust & 3u)) return -1;
     if (tiku_s31_trng_init()) return -1;
     saved_wifi_clock = REG(0x20109c14u) & 0x7ffu;
+#if TIKU_S31_RADIO_COEX
+    for (unsigned i = 0; i < sizeof shared_clocks / sizeof shared_clocks[0]; i++)
+        saved_shared[i] = REG(shared_clocks[i]);
+#endif
     fresh = tiku_drv_phy_s31_calibration_us() == 0;
     if (tiku_drv_phy_s31_on()) return -1;
     /* Wi-Fi DMA master 3 requires access to the SRAM descriptor and buffer pool. */
@@ -42,6 +52,10 @@ void espw_s31_radio_release(void)
     if (!prepared) return;
     if (wifi_on) tiku_s31_fatal("PHY release while Wi-Fi active");
     if (tiku_drv_phy_s31_off()) tiku_s31_fatal("PHY shutdown");
+#if TIKU_S31_RADIO_COEX
+    for (unsigned i = 0; i < sizeof shared_clocks / sizeof shared_clocks[0]; i++)
+        REG(shared_clocks[i]) = saved_shared[i];
+#endif
     REG(0x20109c14u) = (REG(0x20109c14u) & ~0x7ffu) | saved_wifi_clock;
     REG(0x2050400cu) = saved_trust;
     if (phy_lock) espw_osi_funcs._mutex_delete(phy_lock);

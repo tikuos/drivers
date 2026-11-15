@@ -37,7 +37,9 @@ static tiku_arena_t core_ext_arena;
  * 22 KB of SRAM, BLE at 33 KB.  C5: Wi-Fi's buffers stay in SRAM and a scan
  * of both bands holds every record it heard, 64 KB alone; BLE 40 KB. */
 #ifndef TIKU_DRV_ESP_COEX_HEAP_BYTES
-#if defined(PLATFORM_ESP32C5)
+#if defined(PLATFORM_ESP32S31)
+#define TIKU_DRV_ESP_COEX_HEAP_BYTES (88U * 1024U)
+#elif defined(PLATFORM_ESP32C5)
 #define TIKU_DRV_ESP_COEX_HEAP_BYTES (96U * 1024U)
 #else
 #define TIKU_DRV_ESP_COEX_HEAP_BYTES (60U * 1024U)
@@ -87,7 +89,12 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
         && radio != ESPW_RADIO_BLE
 #endif
     ) return -1;
-    if (ext_bytes != 0 || core_radios) return -1;
+    if (ext_bytes != 0) return -1;
+#if TIKU_S31_RADIO_COEX
+    if (core_radios & radio) return -1;
+#else
+    if (core_radios) return -1;
+#endif
 #endif
 
 #if (TIKU_DRV_SDR_ESP_TX_ENABLE + 0) && defined(PLATFORM_ESP32C61)
@@ -146,6 +153,20 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     if (ext_bytes != 0U && !core_ext_taken) {
         core_ext_take(ext_bytes);
     }
+#if ESPW_COEX && defined(PLATFORM_ESP32S31)
+    /* The arbiter uses OS timers; S31 PHY calibration calls its ROM adapter. */
+    core_osi_started = 1U;
+    if (espw_osi_start() != 0) {
+        core_radios = radio;
+        espw_core_down(radio);
+        return -1;
+    }
+    if (espw_coex_start() != 0) {
+        core_radios = radio;
+        espw_core_down(radio);
+        return -1;
+    }
+#endif
 #if defined(PLATFORM_ESP32C5) || defined(PLATFORM_ESP32S31)
 #if defined(PLATFORM_ESP32S31)
     if (espw_s31_radio_prepare() != 0) {
@@ -158,14 +179,20 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes) {
     }
 #endif
     espw_modem_init();
+#if !(ESPW_COEX && defined(PLATFORM_ESP32S31))
     core_osi_started = 1U;
     if (espw_osi_start() != 0) {
         core_radios = radio;
         espw_core_down(radio);
         return -1;
     }
-#if ESPW_COEX
-    espw_coex_start();
+#endif
+#if ESPW_COEX && !defined(PLATFORM_ESP32S31)
+    if (espw_coex_start() != 0) {
+        core_radios = radio;
+        espw_core_down(radio);
+        return -1;
+    }
 #endif
     core_radios = radio;
     return 0;

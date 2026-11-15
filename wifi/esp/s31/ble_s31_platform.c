@@ -34,6 +34,7 @@ static uint32_t clocks0, clocks1, lp0, lp1;
 static unsigned clock_live;
 extern int r_btdm_hal_rtc_freq_set(uint64_t);
 extern void bt_bb_v2_init_cmplx(unsigned);
+extern uint8_t espw_core_radios(void);
 
 void btdm_lp_enable_clock(esp_bt_ctrl_btdm_config_t *cfg)
 {
@@ -58,6 +59,10 @@ void btdm_lp_enable_clock(esp_bt_ctrl_btdm_config_t *cfg)
     SYSCON->modem_rst_conf.rst_btmac_apb = 0;
     SYSCON->modem_rst_conf.rst_ble_timer = 1;
     SYSCON->modem_rst_conf.rst_ble_timer = 0;
+#if TIKU_S31_RADIO_COEX
+    /* Wi-Fi retains the shared security engines while it owns the radio. */
+    if (!(espw_core_radios() & 1u)) {
+#endif
     SYSCON->modem_rst_conf.rst_modem_ecb = 1;
     SYSCON->modem_rst_conf.rst_modem_ecb = 0;
     SYSCON->modem_rst_conf.rst_modem_ccm = 1;
@@ -66,6 +71,9 @@ void btdm_lp_enable_clock(esp_bt_ctrl_btdm_config_t *cfg)
     SYSCON->modem_rst_conf.rst_modem_bah = 0;
     SYSCON->modem_rst_conf.rst_modem_sec = 1;
     SYSCON->modem_rst_conf.rst_modem_sec = 0;
+#if TIKU_S31_RADIO_COEX
+    }
+#endif
     /* The 40 MHz crystal divided by 400 supplies the 100 kHz BLE timer. */
     LPCON->lp_timer_conf.val = 4u | (399u << 4);
     LPCON->clk_conf.clk_lp_timer_en = 1;
@@ -76,6 +84,10 @@ void btdm_lp_enable_clock(esp_bt_ctrl_btdm_config_t *cfg)
 void btdm_lp_disable_clock(void)
 {
     if (!clock_live) return;
+#if TIKU_S31_RADIO_COEX
+    /* The final radio release restores the shared modem clock snapshot. */
+    if (espw_core_radios() & 1u) { clock_live = 0; return; }
+#endif
     SYSCON->clk_conf.val = clocks0;
     SYSCON->clk_conf1.val = clocks1;
     LPCON->lp_timer_conf.val = lp0;

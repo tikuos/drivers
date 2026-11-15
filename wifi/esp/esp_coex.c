@@ -117,12 +117,12 @@ static espw_coex_adapter_t espw_coex_adapter = {
     ._magic = (int32_t)ESPW_COEX_ADAPTER_MAGIC,
 };
 
-void espw_coex_start(void) {
+int espw_coex_start(void) {
     static uint8_t registered;
     esp_err_t rc;
 
     if (registered) {
-        return;
+        return registered == 1U ? 0 : -1;
     }
     espw_coex_adapter._semphr_create = espw_osi_funcs._semphr_create;
     espw_coex_adapter._semphr_delete = espw_osi_funcs._semphr_delete;
@@ -137,10 +137,12 @@ void espw_coex_start(void) {
     coexa_booting = 0U;
     if (rc != ESP_OK) {
         TIKU_PRINTF("[esp] coexistence: 0x%lx\n", (unsigned long)rc);
-        return;
+        registered = 2U;
+        return -1;
     }
     registered = 1U;
     TIKU_PRINTF("[esp] coexistence %s\n", coex_version_get());
+    return 0;
 }
 
 /* The library prints through this, formatted here as the others are. */

@@ -6,6 +6,9 @@
  */
 #pragma once
 #include "soc/soc_caps.h"
+#if TIKU_S31_RADIO_COEX
+#define CONFIG_SW_COEXIST_ENABLE 1
+#endif
 #define CONFIG_IDF_TARGET_ESP32S31 1
 #define CONFIG_BTDM_CTRL_MODE_BLE_ONLY 1
 #define CONFIG_BT_CTRL_MULTI_LINK_ENABLED 1

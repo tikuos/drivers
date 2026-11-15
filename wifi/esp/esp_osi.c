@@ -1244,12 +1244,15 @@ static void *osi_retention_link(int id) {
 }
 
 #if defined(PLATFORM_ESP32S31)
-#if ESPW_COEX
-#error "S31 coexistence requires its preemption callback binding"
-#endif
-/** @brief No preemption callback is needed with the coexistence arbiter disabled. */
+/** @brief Bind the S31 Wi-Fi preemption callback when the arbiter is enabled. */
 static int osi_s31_preemption(bool is_register, int (*cb)(uint32_t))
-{ (void)is_register; (void)cb; return ESP_OK; }
+{
+#if ESPW_COEX
+    return esp_coex_configure_iso_end_wifi_cb(is_register, cb);
+#else
+    (void)is_register; (void)cb; return ESP_OK;
+#endif
+}
 #endif
 
 wifi_osi_funcs_t espw_osi_funcs = {

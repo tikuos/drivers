@@ -44,7 +44,7 @@
 
 /* BLE built with Wi-Fi or with the C5's 15.4 MAC: they may run at once,
  * under the coexistence arbiter. */
-#define ESPW_COEX   ((TIKU_DRV_BLE_ESP_ENABLE + 0) && \
+#define ESPW_COEX   (((TIKU_DRV_BLE_ESP_ENABLE + 0) || (TIKU_S31_RADIO_COEX + 0)) && \
                      ((TIKU_DRV_WIFI_ESP_ENABLE + 0) || \
                       (TIKU_DRV_154_C5_ENABLE + 0)))
 
@@ -61,9 +61,9 @@ int espw_core_up(uint8_t radio, uint32_t heap_bytes, uint32_t ext_bytes);
  *         the heap back if nothing is left in it. */
 void espw_core_down(uint8_t radio);
 
-/** @brief The arbiter's adapter registered and pre-initialised, once per
- *         boot (esp_coex.c; both radios built). */
-void espw_coex_start(void);
+/** @brief Register and pre-initialize the arbiter once per boot.
+ *  @return 0 on success; -1 after an initialization failure, until reset. */
+int espw_coex_start(void);
 
 /** @brief The radios up now (ESPW_RADIO_*). */
 uint8_t espw_core_radios(void);

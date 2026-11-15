@@ -35,10 +35,10 @@ def main():
         def values(name, header, expressions):
             source = work / (name + '.c')
             assembly = source.with_suffix('.s')
-            source.write_text('#include <stddef.h>\n#include "' + str(header) +
+            source.write_text('#include <stddef.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include "' + str(header) +
                 '"\nconst unsigned abi[]={' + ','.join(expressions) + '};\n')
             subprocess.run(flags + ['-S', str(source), '-o', str(assembly)], check=True)
-            result = [int(v) for v in re.findall(r'\.word\s+(\d+)', assembly.read_text())]
+            result = [int(v) & 0xffffffff for v in re.findall(r'\.word\s+(-?\d+)', assembly.read_text())]
             if len(result) != len(expressions):
                 raise ValueError('compiler ABI output length: ' + name)
             return result
@@ -47,6 +47,25 @@ def main():
         native = values('wifi-native', base.parent / 'esp_abi.h', expressions)
         if native != values('wifi-vendor', wifi, expressions):
             raise ValueError('Wi-Fi OSI layout differs from SDK')
+        coex = args.idf.resolve() / 'components/esp_coex/include/private/esp_coexist_adapter.h'
+        coex_pre = subprocess.check_output(flags + ['-E', '-P', '-include', str(coex),
+                                                    '-xc', '/dev/null'], text=True)
+        coex_fields = ['_version'] + re.findall(r'\(\*\s*(_\w+)\)', coex_pre) + ['_magic']
+        coex_expressions = ['sizeof(espw_coex_adapter_t)', 'ESPW_COEX_ADAPTER_VERSION',
+                            'ESPW_COEX_ADAPTER_MAGIC'] + [
+            'offsetof(espw_coex_adapter_t,' + f + ')' for f in coex_fields]
+        coexistence = values('coex-native', base.parent / 'esp_coex_abi.h', coex_expressions)
+        coex_vendor = [e.replace('espw_coex_adapter_t', 'coex_adapter_funcs_t').replace(
+            'ESPW_COEX_', 'COEX_') for e in coex_expressions]
+        if coexistence != values('coex-vendor', coex, coex_vendor):
+            raise ValueError('coexistence adapter ABI differs from SDK')
+        coex_internal = coex.with_name('esp_coexist_internal.h')
+        callback = re.search(r'esp_err_t esp_coex_configure_iso_end_wifi_cb\([^;]+;',
+                             coex_internal.read_text()).group(0)
+        signature = work / 'coex-signature.c'
+        signature.write_text('#include "' + str(base.parent / 'esp_coex_abi.h') +
+                             '"\n' + callback + '\n')
+        subprocess.run(flags + ['-fsyntax-only', str(signature)], check=True)
         handles = ['event', 'eventq', 'callout', 'mutex', 'sem']
         errors = ['OK', 'ENOMEM', 'EINVAL', 'INVALID_PARM', 'MEM_NOT_ALIGNED',
                   'BAD_MUTEX', 'TIMEOUT', 'ERR_IN_ISR', 'ERR_PRIV', 'NOT_STARTED',
@@ -134,8 +153,9 @@ def main():
         report = dict(wifi_size=native[0], wifi_offsets=dict(zip(fields, native[1:])),
                       ble_layout_and_errors=ble, ble_signatures=len(symbols),
                       btdm_pool_layout=pool_layout, btdm_pool_signatures=len(pool_symbols),
+                      coexistence_abi=dict(zip(coex_expressions, coexistence)),
                       station_abi=dict(zip(contracts, station)), inputs={str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                      for p in (wifi, bt, types, pool)})
+                      for p in (wifi, bt, types, pool, coex, coex_internal)})
         args.output.write_text(json.dumps(report, indent=2) + '\n')
         print(f'PASS Wi-Fi {native[0]} bytes/{len(fields)} offsets; BLE handles, pools and errors')
 

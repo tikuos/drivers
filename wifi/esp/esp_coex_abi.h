@@ -79,6 +79,7 @@ void *coex_schm_curr_phase_get(void);
 int coex_schm_process_restart(void);
 int coex_schm_register_callback(int type, void *callback);
 int coex_register_start_cb(int (*cb)(void));
+esp_err_t esp_coex_configure_iso_end_wifi_cb(bool is_register, void *cb);
 void *coex_schm_get_phase_by_idx(int phase_idx);
 
 #endif /* TIKU_DRV_WIFI_ESP_COEX_ABI_H_ */

@@ -21,30 +21,43 @@ the radio build profiles. `vendor/` is ignored. The fetcher includes the
 Wi-Fi, PHY and coexistence archive licenses and the S31 ROM address maps.
 The ABI checker compares compiler-produced sizes and offsets against the
 SDK headers, including the S31-specific 512-byte Wi-Fi OSI table, station
-configuration/events, BTDM callback declarations and fixed-block pool layouts.
+configuration/events, BTDM callback declarations, fixed-block pool layouts
+and the 80-byte coexistence adapter.
 The pinned SDK is
 `4d59230ddff16327812782151ef0afef202dc6d7`.
 
-Bluetooth controller archives are excluded from the fetcher and build.
+Bluetooth controller archives are excluded from the fetcher. The optional
+BLE build takes externally supplied archives through `S31_BT_LIB_DIR`.
 The audited `esp32s31-bt-lib` revision
 `10c507788e9da0993709cf82e405c896561172d8` contains NimBLE attribution in
 `README.md` and `NOTICE`; the audit has not established redistribution
-terms covering the complete controller archives. Adding those archives
-requires resolving that boundary and implementing the controller lifecycle.
+terms covering the complete controller archives. Redistribution requires
+resolving those terms.
 
 ## Ownership
 
-`esp_core.c` admits Wi-Fi as the S31 radio owner. Concurrent BLE ownership
-and coexistence are refused. Start acquires the PHY, hardware entropy
-source and Wi-Fi DMA master 3's SRAM access. A locked, untrusted DMA master
-is refused. Stop drains the radio workers and restores the acquired DMA
-permission and digital clock fields before releasing the heap.
+`esp_core.c` manages Wi-Fi and optional BLE ownership. The default build
+requires one radio to stop before the other starts. Start acquires the PHY,
+hardware entropy source and Wi-Fi DMA master 3's SRAM access. A locked,
+untrusted DMA master is refused. Stop drains the radio workers and restores
+the acquired DMA permission and digital clock fields before releasing the heap.
+
+`S31_RADIO_COEX=1 S31_BLE_ENABLE=1` selects the shared-radio adapter and an
+88 KiB SRAM heap. The OS timer service starts before coexistence registration;
+PHY calibration requires the registered ROM adapter. Initialization failure
+refuses startup. Each radio retains ownership through its controller shutdown,
+and the final release restores the shared clocks and DMA permissions. The BLE
+startup path preserves security engines held by Wi-Fi. This configuration
+does not use PSRAM for radio packet buffers.
 
 The PHY calibrates once after reset and uses its wakeup entry on later
 starts. The vendor calibration call has no software timeout. Shared BB/APB
 clocks remain enabled until PHY shutdown completes. Station modem sleep is explicitly disabled. Analog and BBPLL power
 are retained until reset; this backend does not implement modem sleep or
-qualify radio energy consumption.
+qualify radio energy consumption. A hardware entropy health fault disables
+further random output until reset. Radio callbacks requiring randomness
+terminate firmware when that source is unavailable. RF-load testing has
+observed this failure; sustained radio reliability remains unqualified.
 
 `radio_memory.c` supplies `memcpy` to the radio profiles. Aligned word copies
 use 32-bit loads and stores, including 16-byte copies. The vendor MAC library
@@ -149,19 +162,28 @@ and erases the previous record. The backend stores one mode at a time and
 does not implement automatic unlock, flash rollback protection or secure
 boot. It does not expose a general persistent VFS medium.
 
-Normal-firmware station association, DHCP and ICMP replies, AP startup,
-independent WPA2/WPA3 advertisement detection and encrypted-profile
-save/reboot/unlock/forget have hardware qualification. S31 AP client data,
-SAE authentication and PMF exchanges with an independent peer remain
-unqualified. Modem sleep, graphical network settings and concurrent
-audio/display/storage traffic remain outside this profile.
+Normal-firmware station association, DHCP and ICMP replies, WPA2/WPA3 AP
+client data and encrypted-profile save/reboot/unlock/forget have hardware
+qualification. An independent C5 peer authenticated to both AP modes and
+received 300/300 replies to 512-byte pings while the AP rotated its group
+key at a test interval of ten seconds. Wrong passwords were rejected. The
+station installed renewed group keys from the C5 AP in both modes and
+received eight replies before and after renewal. WPA3 uses SAE and required
+PMF; this check does not qualify forged-management-frame handling.
+
+Station recovery makes three automatic rejoin attempts. After exhausting
+that budget, use `wifi connect` or `wifi connect3` when the AP returns.
+Station shutdown releases the vendor's copy of the WPA3 RSNXE before
+releasing the shared heap. Modem sleep, graphical network settings and
+concurrent audio/display/storage traffic remain outside this profile.
 
 ## BLE controller and host
 
 `S31_BLE_ENABLE=1` adds the native BTDM controller, bounded HCI transport,
 TikuKits BLE host and `bt` commands to the normal firmware profile. The
-controller and Wi-Fi share exclusive PHY ownership. Stop one radio before
-starting the other. Modem sleep is disabled while BLE is on.
+default controller build and Wi-Fi share exclusive PHY ownership. Select
+`S31_RADIO_COEX=1` to enable concurrent ownership as described above. Modem
+sleep is disabled while BLE is on.
 
 The build requires an external ESP-IDF source tree at
 `4d59230ddff16327812782151ef0afef202dc6d7` and the `libble_app.a` and
@@ -197,10 +219,14 @@ bt off
 The host supports central and peripheral roles, legacy and extended
 advertising/scanning, 1M/2M/Coded PHYs, GATT client/server operations and
 LE Secure Connections. It uses the S31 health-checked random source and
-software P-256 when the controller lacks that HCI operation. The profile
-budgets two connections and two advertising sets. One external C5 peer
-has qualified each connection role; two simultaneous links require further
-hardware qualification.
+software P-256 when the controller lacks that HCI operation. ECDH yields to
+native controller workers after each four scalar bits. The progress callback
+does not dispatch host packets or reenter P-256. The profile
+budgets two connections and two advertising sets. C5 qualifies each
+connection role. C5 and a Linux Bluetooth peer each receive and check
+128 KiB of notifications on two simultaneous encrypted links, using 2M and
+1M respectively. C5 independently discovers two advertising sets on 1M
+and Coded PHYs.
 
 The controller uses a 56 KiB SRAM heap and a 4096-byte receive ring. HCI
 lengths are checked before allocation. Buffer exhaustion returns an error;
@@ -208,8 +234,8 @@ receive overflow latches a transport fault cleared by `bt off` followed by
 `bt on`. A failed controller shutdown retains radio ownership; another
 `bt off` retries teardown. The host scratch arena has fixed placement so radio heap release
 does not leave it between free SRAM ranges. The linker places foreground
-cryptography and BLE host code in flash while retaining vendor IRAM sections
-in SRAM. The firmware mapping has room for 1 MiB of mapped code.
+cryptography, BLE host code, formatted output and software double-precision
+arithmetic in flash while retaining vendor IRAM sections in SRAM. The firmware mapping has room for 1 MiB of mapped code.
 
 `btdm_s31_osal.c` supplies native workers, interrupts and NPL callbacks.
 `btdm_s31_mempool.c` binds packet pools and selective controller-pool teardown
@@ -221,6 +247,14 @@ C5 peer tests cover discovery, connections in both roles, GATT reads and
 writes, 2M/Coded PHY transitions, Coded discovery and encrypted pairing.
 The negotiated limits are a 247-byte ATT MTU and 251-byte link-layer packets.
 The C5 received and checked 4096 notification bytes over a Coded connection.
-BLE shutdown, Wi-Fi startup and scanning, then BLE restart passed in one boot.
-Long-duration traffic, cold power cycles, simultaneous links, sleep current
-and concurrent Wi-Fi/BLE operation are outside this qualification.
+Bond reuse and encrypted data transfer pass after software rebooting both
+boards. Encryption-key refresh on one link permits pairing the second peer.
+
+Concurrent Wi-Fi/BLE qualification starts the radios in both orders. Each
+order transfers 256 KiB of checked BLE notifications, with 197/200 replies
+to simultaneous 512-byte Wi-Fi pings and no heap allocation refusals.
+Wi-Fi remains usable after BLE shutdown, and GATT reads work after Wi-Fi
+shutdown. These results do not qualify lossless Wi-Fi delivery under BLE
+traffic. Long-duration operation, physical power removal, sleep current,
+multiple AP clients and combined audio/display/storage traffic remain
+outside this qualification.
