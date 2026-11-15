@@ -794,6 +794,9 @@ static bool wpa_init(void) {
 }
 
 static bool wpa_deinit(void) {
+#if TIKU_ESP_SAE_ENABLE
+    (void)esp_wifi_unset_appie_internal(1);
+#endif
     (void)esp_wifi_register_eapol_txdonecb_internal(NULL);
     wpa_clear();
     return true;
@@ -849,6 +852,10 @@ int espw_wpa_register(void) {
 }
 
 void espw_wpa_unregister(void) {
+#if TIKU_ESP_SAE_ENABLE
+    /* The station RSNXE is copied into the vendor heap. */
+    (void)esp_wifi_unset_appie_internal(1);
+#endif
     (void)esp_wifi_unregister_wpa_cb_internal();     /* frees the table */
     wpa_clear();
 }
