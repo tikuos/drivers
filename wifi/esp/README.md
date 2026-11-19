@@ -3,6 +3,12 @@
 For the native C6 Wi-Fi/BLE adapters and their qualification limits, see
 [`c6/README.md`](c6/README.md).
 
+`TIKU_WIRELESS_OBSERVE_ENABLE=1` provides `tiku_wireless_observe()` for
+serialized kernel-owner consumers. It copies cached power, scan and link
+flags without vendor calls, waits, allocation or radio I/O. The ESP adapter
+reports no queued disconnect flag. The existing synchronous status query
+continues to include RSSI. The observation feature is disabled by default.
+
 For the C5 PHY and opt-in native Wi-Fi, BLE and SDR adapters, see
 [`c5/README.md`](c5/README.md). The qualification results below describe C61,
 not C5. The OS adapter is shared; hardware bindings and vendor archives differ.

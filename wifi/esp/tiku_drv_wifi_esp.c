@@ -1401,3 +1401,17 @@ int tiku_wireless_tx_if(uint8_t interface, const uint8_t *frame, uint16_t len)
     return !rc ? TIKU_DRV_OK : rc == ESP_ERR_NO_MEM ? TIKU_DRV_ERR_TIMEOUT : TIKU_DRV_ERR_IO;
 }
 #endif
+
+#if TIKU_WIRELESS_OBSERVE_ENABLE
+int tiku_wireless_observe(tiku_wireless_observation_t *out)
+{
+    if (out == NULL) return TIKU_DRV_ERR_INVALID;
+    memset(out, 0, sizeof *out);
+    if (espw_arch_in_isr() || !tiku_thread_in_kernel())
+        return TIKU_DRV_ERR_TIMEOUT;
+    out->up = espw_up;
+    out->scan_in_progress = espw_scanning;
+    out->link_state = espw_link;
+    return TIKU_DRV_OK;
+}
+#endif
