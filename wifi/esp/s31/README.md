@@ -6,6 +6,12 @@ adapter. Scanning, WPA2 association, DHCP and bidirectional UDP have hardware
 evidence across three start/stop cycles. It runs on CPU0 with a 40 MHz crystal. Library instructions use
 flash; interrupt paths, descriptors and the 64 KiB radio heap use SRAM.
 
+`TIKU_S31_RADIO_IMAGE_BOUNDS_ENABLE=1` checks the station entry against
+`__tiku_s31_irom_start` and `__tiku_s31_irom_end` supplied by the radio linker.
+This admits firmware compositions whose station code exceeds the diagnostic
+window while refusing addresses outside the linked segment. The default
+retains the existing diagnostic/BLE window checks.
+
 ## Assets and ABI
 
 From the TikuOS root:

@@ -50,6 +50,10 @@ void espw_arch_sleep_hold(int hold);
 void espw_s31_log(const char *format, ...);
 /** @brief Read from the initialized LP random source with hardware health checks. */
 int espw_s31_random(uint8_t *out, size_t length);
+#ifndef TIKU_S31_RADIO_IMAGE_BOUNDS_ENABLE
+/** @brief Admit station entries using the linked radio image bounds. */
+#define TIKU_S31_RADIO_IMAGE_BOUNDS_ENABLE 0
+#endif
 /** @brief Check that the station entry is in the bootloader-mapped radio image. */
 int espw_arch_xip_ok(void);
 /** @brief Reserve RF and Wi-Fi DMA access before creating workers; return 0 or -1. */
