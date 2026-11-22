@@ -16,6 +16,8 @@
 #define ADDRESS 0x14u
 #define PRODUCT 0x8140u
 #define REPORT  0x814eu
+/* Status bit: the controller holds a report the host has not acknowledged. */
+#define READY   0x80u
 
 /** @brief Read a big-endian register address through a repeated START. */
 static int read_register(uint16_t reg, uint8_t *bytes, uint16_t count)
@@ -51,6 +53,8 @@ int tiku_drv_input_gt1151_poll(tiku_gt1151_report_t *report)
     if (report == NULL) return TIKU_DRV_ERR_INVALID;
     memset(report, 0, sizeof(*report));
     if (read_register(REPORT, &status, 1) != 0) return TIKU_DRV_ERR_IO;
+    /* Without a report the count bits say nothing about the panel. */
+    if (!(status & READY)) return TIKU_DRV_OK;
     unsigned count = status & 15u;
     unsigned length = 1u + 8u * count + 2u;
     if (count && count <= TIKU_GT1151_MAX_POINTS &&
@@ -58,7 +62,10 @@ int tiku_drv_input_gt1151_poll(tiku_gt1151_report_t *report)
     if (tiku_i2c_write(ADDRESS, acknowledge, sizeof(acknowledge)) != 0)
         return TIKU_DRV_ERR_IO;
     if (count > TIKU_GT1151_MAX_POINTS) return TIKU_DRV_ERR_INVALID;
-    if (!count) return TIKU_DRV_OK;
+    if (!count) {
+        report->fresh = 1;
+        return TIKU_DRV_OK;
+    }
     uint8_t sum = 0;
     for (unsigned i = 0; i < length; i++) sum += bytes[i];
     if (sum || (bytes[0] & 15u) != count) return TIKU_DRV_ERR_INVALID;
@@ -76,6 +83,7 @@ int tiku_drv_input_gt1151_poll(tiku_gt1151_report_t *report)
         report->points[i].strength = little16(p + 5);
     }
     report->count = count;
+    report->fresh = 1;
     return TIKU_DRV_OK;
 }
 
