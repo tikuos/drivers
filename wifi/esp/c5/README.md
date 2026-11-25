@@ -369,6 +369,25 @@ arrived intact on channels 11, 15 and 26 (C5 at -44 to -53 dBm, nRF at -56 to
 `radio154` suite with the C5 as DUT passes 6 of 6 on channel 15: 200/200
 unicasts ACKed each way and 150/150 secured frames verified each way.
 
+## Another board's radio
+
+TikuBench runs three suites on the TikuComputer-nRF (`--board
+tikucomputer_nrf`) with a C5 as the second board, the two on one bench;
+the TikuComputer's console is RTT, on the J-Link `TIKUBENCH_JLINK_SN` names.
+
+- `rf-carrier`, with the SDR profile: the nRF54L10's `rftest` carrier at
+  2402, 2440 and 2480 MHz, a power ladder, the frequency offset from a raw
+  capture and the width at 1M and 2M.  `sdr hex` words are mirrored (the
+  spectrum command corrects this), so the suite conjugates them.
+- `bt-link`, with the BLE profile: both roles, LE Secure Connections
+  pairing, GATT, a reconnect from the bond, a reboot of both boards, the
+  shell over the Nordic UART Service each way and the beacons.
+- `radio154`, with an 802.15.4 profile: the C5 listens to the nRF and sends
+  to it, plain and secured.
+
+On 2026-11-25 they passed 6/6, 10/10 and 7/7; the carrier was 9.8 ppm
+above nominal against the C5's crystal.
+
 ## Calls and ownership
 
 Call `tiku_drv_phy_c5_on()` from kernel foreground with interrupts enabled.
