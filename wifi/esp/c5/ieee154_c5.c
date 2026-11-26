@@ -148,6 +148,7 @@ static uint8_t rx_frame[1u + TIKU_154_MAX_FRAME] __attribute__((aligned(4)));
 static uint32_t saved_clk, saved_clk1, saved_map;
 #endif
 static uint8_t active;
+static uint8_t listening;                   /* background RX armed       */
 static uint8_t cur_chan = TIKU_154_CHAN_MIN;
 
 /** @brief Set the bits of @p mask in @p address to @p value. */
@@ -166,9 +167,11 @@ static uint8_t clamp(uint8_t channel)
     return channel > TIKU_154_CHAN_MAX ? TIKU_154_CHAN_MAX : channel;
 }
 
-/** @brief Stop whatever the MAC runs and clear the events it left. */
+/** @brief Stop whatever the MAC runs, a background listen included, and
+ *         clear the events it left. */
 static void mac_stop(void)
 {
+    listening = 0;
     TIKU_C5_REG_WRITE(ZB_CMD, CMD_STOP);
     TIKU_C5_REG_WRITE(ZB_EVENT, EV_ALL);
 }
@@ -572,4 +575,68 @@ int tiku_ieee154_arch_ccm_star(int decrypt, const uint8_t key[16],
                    TIKU_KITS_CRYPTO_OK
                ? 0
                : -1;
+}
+
+/** @brief Start one promiscuous receive into rx_frame for the listen. */
+static void listen_arm(void)
+{
+    mac_stop();
+    field(ZB_CTRL, CTRL_ACK_TX | CTRL_PROMISC | CTRL_INF0, CTRL_PROMISC);
+    rx_frame[0] = 0;
+    TIKU_C5_REG_WRITE(ZB_RXDMA_ADDR, (uint32_t)(uintptr_t)rx_frame);
+    scene(1);
+    TIKU_C5_REG_WRITE(ZB_CMD, CMD_RX_START);
+    listening = 1;
+}
+
+/* The MAC block holds one frame and goes idle; take() rearms it, so a frame
+ * that ends before the take is not received. */
+int tiku_ieee154_arch_listen(void)
+{
+    if (!active) {
+        return -1;
+    }
+    listen_arm();
+    return 0;
+}
+
+int tiku_ieee154_arch_listen_take(uint8_t *buf, uint8_t cap, int8_t *rssi)
+{
+    uint32_t event;
+    uint8_t len;
+    int n = 0;
+
+    if (!listening) {
+        return 0;
+    }
+    event = TIKU_C5_REG_READ(ZB_EVENT) & (EV_RX_DONE | EV_RX_ABORT);
+    if (!event) {
+        return 0;
+    }
+    if (event & EV_RX_DONE) {
+        len = (uint8_t)(rx_frame[0] & 0x7Fu);
+        if (len >= 2u) {
+            if (rssi) {
+                *rssi = (int8_t)rx_frame[len - 1u];
+            }
+            len = (uint8_t)(len - 2u);
+            if (len > cap) {
+                len = cap;
+            }
+            memcpy(buf, &rx_frame[1], len);
+            n = (int)len;
+        }
+    } else if (((TIKU_C5_REG_READ(ZB_RX_STATUS) >> 4) & 0x1Fu) == ABORT_CRC) {
+        n = -1;
+    }
+    listen_arm();
+    return n;
+}
+
+void tiku_ieee154_arch_listen_stop(void)
+{
+    if (listening) {
+        mac_stop();
+        scene(0);
+    }
 }

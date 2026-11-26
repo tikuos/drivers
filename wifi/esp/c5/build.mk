@@ -53,9 +53,10 @@ SRCS += drivers/wifi/esp/esp_sdr.c $(C5_PHY_DIR)/sdr_c5.c
 CFLAGS += -DTIKU_DRV_SDR_ESP_ENABLE=1 -DTIKU_SHELL_HISTORY_DEPTH=8
 LDFLAGS += -Wl,--defsym=__tiku_c5_sdr=1
 endif
-# IEEE 802.15.4: the PHY under the MAC in interfaces/radio/ and the radio154
-# shell command.  It takes the PHY alone or shares it with BLE, and needs the
-# BLE download for the baseband (libbtbb.a) and the crypto kit's AES for
+# IEEE 802.15.4: the PHY under the MAC in interfaces/radio/, the radio154
+# shell command and /sys/radio/154 (TIKU_HAS_154_LISTEN: the PHY listens in
+# the background).  It takes the PHY alone or shares it with BLE, and needs
+# the BLE download for the baseband (libbtbb.a) and the crypto kit's AES for
 # link security.
 ifeq ($(TIKU_DRV_154_C5_ENABLE),1)
 ifneq ($(filter 1,$(TIKU_DRV_WIFI_ESP_ENABLE) $(TIKU_DRV_SDR_ESP_ENABLE)),)
@@ -70,7 +71,7 @@ endif
 SRCS += $(C5_PHY_DIR)/ieee154_c5.c interfaces/radio/tiku_154_frame.c \
     interfaces/radio/tiku_154.c tikukits/crypto/ccm/tiku_kits_crypto_ccm.c \
     tikukits/crypto/aes128/tiku_kits_crypto_aes128.c
-CFLAGS += -DTIKU_DRV_154_C5_ENABLE=1 -DTIKU_HAS_154=1
+CFLAGS += -DTIKU_DRV_154_C5_ENABLE=1 -DTIKU_HAS_154=1 -DTIKU_HAS_154_LISTEN=1
 TIKU_CAP_154 := 1
 # Beside BLE the MAC is a third radio of the adapter: the shared PHY and
 # baseband, and the arbiter's priorities for its frames.

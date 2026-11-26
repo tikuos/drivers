@@ -336,6 +336,14 @@ and reports the level on the nRF54L's scale, dBm + 94; CCA measures 8 symbols.
 send the ACK; the MAC layer above waits for ACKs to its own frames through
 `rx`.  Link security uses the software AES-CCM* in `tikukits/crypto/ccm/`.
 
+`listen` starts the same promiscuous receive and returns: the MAC block holds
+one frame and goes idle until `listen_take` copies it and starts the next, so
+a frame that ends before the take is not received.  Every other MAC command
+ends the listen.  The build sets `TIKU_HAS_154_LISTEN`, and `/sys/radio/154`
+(`kernel/vfs/tree/tiku_vfs_tree_radio154.c`) sits on it: `channel`,
+`listen`, `tx` (the bytes written go out as one frame), `rx` (takes the
+oldest held frame), `rssi`, `held` and `ed`.
+
 Two timings come from the board, not from ESP-IDF.  After sending an ACK the
 MAC turns back to receive, and a stop inside that turnaround makes its next
 ACK time out (abort reason 16); the driver waits 300 us after each ACK.  And
@@ -383,10 +391,13 @@ the TikuComputer's console is RTT, on the J-Link `TIKUBENCH_JLINK_SN` names.
   pairing, GATT, a reconnect from the bond, a reboot of both boards, the
   shell over the Nordic UART Service each way and the beacons.
 - `radio154`, with an 802.15.4 profile: the C5 listens to the nRF and sends
-  to it, plain and secured.
+  to it, plain and secured; each board takes the other's frame through
+  `/sys/radio/154`; and the TikuComputer's MSP430 sends and receives through
+  its mount of the nRF54L10's files.
 
 On 2026-11-25 they passed 6/6, 10/10 and 7/7; the carrier was 9.8 ppm
-above nominal against the C5's crystal.
+above nominal against the C5's crystal.  On 2026-11-26 `radio154` passed
+9/9 and `bt-link` 17/17.
 
 ## Calls and ownership
 
