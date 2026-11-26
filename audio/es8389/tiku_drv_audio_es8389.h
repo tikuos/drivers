@@ -21,6 +21,10 @@ int tiku_drv_audio_es8389_probe(void);
 int tiku_drv_audio_es8389_open(void);
 /** @brief Set both DAC channels to -48..0 dB and apply mute; errors latch failure. */
 int tiku_drv_audio_es8389_output(int attenuation_db, unsigned mute);
+/** @brief Set both differential microphone inputs' PGA to the codec step at
+ *  @p gain_db rounded down to a multiple of 3, 0..36; the steps above 0 dB
+ *  are 0.5 dB higher.  A failed write returns TIKU_DRV_ERR_IO. */
+int tiku_drv_audio_es8389_input(int gain_db);
 /** @brief Mute ADC/DAC and power down the codec; keep the shared I2C bus open. */
 int tiku_drv_audio_es8389_close(void);
 /** @brief Probe-only registration; streaming setup is explicit. */

@@ -92,6 +92,14 @@ int tiku_drv_audio_es8389_output(int attenuation_db, unsigned mute)
     }
     return 0;
 }
+int tiku_drv_audio_es8389_input(int gain_db)
+{
+    /* PGA codes for 0, 3.5, 6.5, 9.5, then 12.5..36.5 dB in 3 dB steps. */
+    static const uint8_t code[] = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    if (!opened || failed || gain_db < 0 || gain_db > 36) return TIKU_DRV_ERR_INVALID;
+    uint8_t value = (uint8_t)(0x10u | code[gain_db / 3]);
+    return write_reg(0x72, value) || write_reg(0x73, value) ? TIKU_DRV_ERR_IO : 0;
+}
 const tiku_drv_t tiku_drv_audio_es8389 = {
     .name = "es8389", .class = TIKU_DRV_CLASS_OTHER,
     .init = tiku_drv_audio_es8389_probe, .deinit = tiku_drv_audio_es8389_close

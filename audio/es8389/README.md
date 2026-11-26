@@ -4,7 +4,8 @@ The driver identifies the ES8389 at seven-bit I2C address `0x10` and
 configures stereo PCM16 I2S at 16 kHz with a 512 kHz BCLK input. The board
 supplies no MCLK. ADC slot zero is the left differential microphone input;
 slot one is the right differential input. DAC reference slots are disabled.
-Microphone PGA gain is 0 dB. DAC setup is muted at -48 dB; the output API
+Microphone PGA gain opens at 0 dB; `tiku_drv_audio_es8389_input()` sets
+both inputs to 0..36 dB in 3 dB steps (3.5..36.5 dB above 0). DAC setup is muted at -48 dB; the output API
 accepts -48..0 dB and mute. It mutes before changing both channel volumes.
 
 The caller initializes I2C, starts BCLK/WS, then opens the codec. Calls must
