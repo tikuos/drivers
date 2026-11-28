@@ -22,6 +22,9 @@
 
 #include "kernel/drivers/tiku_drv.h"
 
+#if TIKU_DRV_AUDIO_ES8311_ENABLE
+extern const tiku_drv_t tiku_drv_audio_es8311;
+#endif
 #if TIKU_DRV_AUDIO_ES8389_ENABLE
 extern const tiku_drv_t tiku_drv_audio_es8389;
 #endif
@@ -73,6 +76,9 @@ extern const tiku_drv_t tiku_drv_sensor_temperature_mcp9808;
 /*---------------------------------------------------------------------------*/
 
 const tiku_drv_t *const tiku_drv_table[] = {
+#if TIKU_DRV_AUDIO_ES8311_ENABLE
+    &tiku_drv_audio_es8311,
+#endif
 #if TIKU_DRV_AUDIO_ES8389_ENABLE
     &tiku_drv_audio_es8389,
 #endif
